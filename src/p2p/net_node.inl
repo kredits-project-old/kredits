@@ -401,23 +401,15 @@ namespace nodetool
     std::set<std::string> full_addrs;
     if (nettype == cryptonote::TESTNET)
     {
-      full_addrs.insert("52.63.146.137:38156");
     }
     else if (nettype == cryptonote::STAGENET)
     {
-      full_addrs.insert("13.211.225.142:38153");
     }
     else if (nettype == cryptonote::FAKECHAIN)
     {
     }
     else
     {
-      full_addrs.insert("13.55.199.36:22022");   // Sydney A Box
-	    full_addrs.insert("162.243.164.223:22022"); //Jeff's i2p.rocks
-	    full_addrs.insert("192.250.236.196:22022"); //Rangeproof Test VPSC Box
-	    full_addrs.insert("162.208.9.194:22022");  // Simon's spare
-	    full_addrs.insert("162.208.9.194:22022");  // OVH(1) is bae
-  	  full_addrs.insert("51.38.133.145:22022");  // OVH(2) is bae
     }
     return full_addrs;
   }
