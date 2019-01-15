@@ -110,7 +110,7 @@ namespace cryptonote {
     }
 
     if (version >= 8)
-      base_reward = 900000000000.0 + 1000000000000.0 / kredits_exp2(height / (3600.0 * 90.0)); // halve every 90 days.
+      base_reward = 900000000000.0 + 1000000000000.0 / kredits_exp2(height / (7200.0 * 90.0)); // halve every 90 days.
 
     uint64_t full_reward_zone = get_min_block_weight(version);
 
