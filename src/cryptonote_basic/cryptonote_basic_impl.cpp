@@ -109,6 +109,7 @@ namespace cryptonote {
     }
 
     if (version >= 8)
+
       base_reward = 900000000000.0 + 1000000000000.0 / kredits_exp2(height / (1800.0 * 90.0)); // Decreases 1 coin every 25 blocks.(To be changed soon)
 
     uint64_t full_reward_zone = get_min_block_weight(version);
