@@ -1,6 +1,6 @@
 // Copyright (c) 2014-2018, The Monero Project
 // Copyright (c)      2018, The Loki Project
-// Copyright (c)      2018, Kredits Project
+// Copyright (c)      2018, The Kredits Project
 //
 // All rights reserved.
 //
@@ -37,6 +37,8 @@
 #include "misc_log_ex.h"
 #include "string_tools.h"
 #include "version.h"
+
+#include "common/kredits_integration_test_hooks.h"
 
 #if defined(WIN32)
 #include <crtdbg.h>
@@ -108,7 +110,6 @@ namespace wallet_args
     const command_line::arg_descriptor<std::string> arg_log_file = {"log-file", wallet_args::tr("Specify log file"), ""};
     const command_line::arg_descriptor<std::string> arg_config_file = {"config-file", wallet_args::tr("Config file"), "", true};
 
-
     std::string lang = i18n_get_language();
     tools::on_startup();
 #ifdef NDEBUG
@@ -129,6 +130,10 @@ namespace wallet_args
     command_line::add_arg(desc_params, arg_max_concurrency);
     command_line::add_arg(desc_params, arg_config_file);
 
+#if defined(KREDITS_ENABLE_INTEGRATION_TEST_HOOKS)
+    command_line::add_arg(desc_params, kredits::arg_integration_test_shared_mem_name);
+#endif
+
     i18n_set_language("translations", "kredits", lang);
 
     po::options_description desc_all;
@@ -139,6 +144,13 @@ namespace wallet_args
     {
       auto parser = po::command_line_parser(argc, argv).options(desc_all).positional(positional_options);
       po::store(parser.run(), vm);
+
+#if defined(KREDITS_ENABLE_INTEGRATION_TEST_HOOKS)
+      {
+        const std::string arg_shared_mem_name = command_line::get_arg(vm, kredits::arg_integration_test_shared_mem_name);
+        kredits::init_integration_test_context(arg_shared_mem_name);
+      }
+#endif
 
       if (command_line::get_arg(vm, command_line::arg_help))
       {
@@ -212,6 +224,14 @@ namespace wallet_args
     MINFO(wallet_args::tr("Logging to: ") << log_path);
 
     Print(print) << boost::format(wallet_args::tr("Logging to %s")) % log_path;
+
+    const ssize_t lockable_memory = tools::get_lockable_memory();
+    if (lockable_memory >= 0 && lockable_memory < 256 * 4096) // 256 pages -> at least 256 secret keys and other such small/medium objects
+      Print(print) << tr("WARNING: You may not have a high enough lockable memory limit")
+#ifdef ELPP_OS_UNIX
+        << ", " << tr("see ulimit -l")
+#endif
+        ;
 
     return {std::move(vm), should_terminate};
   }

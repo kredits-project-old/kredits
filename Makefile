@@ -1,3 +1,5 @@
+# Copyright (c) 2018, The Kredits Project
+# Copyright (c) 2018, The loki Project
 # Copyright (c) 2014-2018, The Monero Project
 #
 # All rights reserved.
@@ -62,6 +64,10 @@ debug: cmake-debug
 debug-test:
 	mkdir -p $(builddir)/debug
 	cd $(builddir)/debug && cmake -D BUILD_TESTS=ON -D CMAKE_BUILD_TYPE=Debug $(topdir) &&  $(MAKE) && $(MAKE) ARGS="-E libwallet_api_tests" test
+
+integration:
+	mkdir -p $(builddir)/integration
+	cd $(builddir)/integration && cmake -D CMAKE_BUILD_TYPE=Debug -D BUILD_INTEGRATION=ON $(topdir) &&  $(MAKE)
 
 debug-all:
 	mkdir -p $(builddir)/debug
@@ -169,4 +175,9 @@ clean-all:
 tags:
 	ctags -R --sort=1 --c++-kinds=+p --fields=+iaS --extra=+q --language-force=C++ src contrib tests/gtest tests
 
-.PHONY: all cmake-debug debug debug-test debug-all cmake-release release release-test release-all clean tags
+# Debug Target for Developers: Only build daemon and wallet
+developer_daemon_and_wallet: tags
+	mkdir -p $(builddir)/debug
+	cd $(builddir)/debug && cmake -D CMAKE_BUILD_TYPE=Debug -D BUILD_TESTS=OFF -D KREDITS_DAEMON_AND_WALLET_ONLY=ON $(topdir) && $(MAKE)
+
+.PHONY: all cmake-debug debug debug-test debug-all cmake-release release release-test release-all clean tags developer_daemon_and_wallet

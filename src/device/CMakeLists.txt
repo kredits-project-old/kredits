@@ -1,5 +1,4 @@
 # Copyright (c) 2018, The Kredits Project
-# Copyright (c) 2018, The Loki Project
 # Copyright (c) 2014-2017, The Monero Project
 #
 # All rights reserved.

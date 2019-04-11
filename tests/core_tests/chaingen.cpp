@@ -59,9 +59,9 @@ bool operator<(const last_reward_point& lhs, const last_reward_point& rhs) {
   return lhs.priority < rhs.priority;
 }
 
-dereg_tx_builder linear_chain_generator::build_deregister(const crypto::public_key& pk)
+dereg_tx_builder linear_chain_generator::build_deregister(const crypto::public_key& pk, bool commit)
 {
-  return dereg_tx_builder(*this, pk);
+  return dereg_tx_builder(*this, pk, commit);
 }
 
 cryptonote::account_base linear_chain_generator::create_account()
@@ -88,67 +88,53 @@ void linear_chain_generator::create_block(const std::vector<cryptonote::transact
   blocks_.push_back(blk);
 }
 
+uint8_t linear_chain_generator::get_hf_version_at(uint64_t height) const {
 
-void linear_chain_generator::continue_until_version(const std::vector<std::pair<uint8_t, uint64_t>> &hard_forks, int hard_fork_version)
+  uint8_t cur_hf_ver = 0;
+
+  for (auto i = 0u; i < hard_forks_.size(); ++i)
+  {
+    if (height < hard_forks_[i].second) break;
+    cur_hf_ver = hard_forks_[i].first;
+  }
+
+  assert(cur_hf_ver != 0);
+  return cur_hf_ver;
+}
+
+void linear_chain_generator::rewind_until_version(int hard_fork_version)
 {
   assert(gen_.m_hf_version < hard_fork_version);
 
-  for (auto i = 0u; i < hard_forks.size() - 1; ++i) {
-    
-    const uint8_t ver = hard_forks[i].first;
-    const uint64_t height = hard_forks[i].second;
+  if (blocks_.size() == 0)
+    create_genesis_block();
 
-    if (ver < get_hf_version()) continue;
+  size_t start_index;
+  for (start_index = 0; start_index < hard_forks_.size(); ++start_index)
+  {
+    const uint8_t version = hard_forks_[start_index].first;
+    if (version > gen_.m_hf_version) break;
+  }
 
-    auto cur_height = blocks_.size();
-    uint64_t next_fork_height = hard_forks[i + 1].second;
-
+  for (size_t i = start_index; i < hard_forks_.size() && gen_.m_hf_version < hard_fork_version; ++i)
+  {
+    auto cur_height                    = blocks_.size();
+    uint64_t next_fork_height          = hard_forks_[i].second;
     uint64_t blocks_till_next_hardfork = next_fork_height - cur_height;
 
     rewind_blocks_n(blocks_till_next_hardfork);
-    gen_.m_hf_version = hard_forks[i + 1].first;
+    gen_.m_hf_version = hard_forks_[i].first;
     create_block();
 
   }
 
-  assert(gen_.m_hf_version == hard_fork_version);
-}
-
-void linear_chain_generator::rewind_until_version(const std::vector<std::pair<uint8_t, uint64_t>> &hard_forks, int hard_fork_version)
-{
-  if (hard_forks.size() > 1)
-  {
-    gen_.m_hf_version = hard_forks[0].first;
-    if (blocks_.size() == 0) create_genesis_block();
-
-    for (size_t i = 0; i < hard_forks.size() - 1 && gen_.m_hf_version != hard_fork_version; ++i)
-    {
-      uint64_t curr_fork_height = hard_forks[i].second;
-      uint64_t next_fork_height = hard_forks[i + 1].second;
-      assert(next_fork_height > curr_fork_height);
-
-      uint64_t blocks_till_next_hardfork = next_fork_height - curr_fork_height;
-      rewind_blocks_n(blocks_till_next_hardfork - 1);
-      gen_.m_hf_version = hard_forks[i + 1].first;
-      create_block();
-    }
-
-    assert(gen_.m_hf_version == hard_fork_version);
-  }
+  assert(gen_.m_hf_version >= hard_fork_version);
 }
 
 int linear_chain_generator::get_hf_version() const {
   return gen_.m_hf_version;
 }
 
-
-void linear_chain_generator::rewind_until_v9()
-{
-  gen_.m_hf_version = 8;
-  create_block();
-  gen_.m_hf_version = 9;
-  create_block();
-}
 
 void linear_chain_generator::rewind_blocks_n(int n)
 {
@@ -188,7 +174,18 @@ cryptonote::block linear_chain_generator::create_block_on_fork(const cryptonote:
   /// now we can add sn from the buffer to be used in consequent nodes
   sn_list_.add_registrations(registration_buffer_);
   registration_buffer_.clear();
-  sn_list_.expire_old(height);
+
+  sn_list_.handle_deregistrations(deregistration_buffer_);
+  deregistration_buffer_.clear();
+
+  /// Note: depending on whether we check in hf9 or later, kredits assignes different meaning to
+  /// "expiration height": in hf9 it expires nodes at their expiration height; after hf9 --
+  /// a the expiration height + 1.
+  if (get_hf_version() == network_version_9_service_nodes) {
+    sn_list_.expire_old(height);
+  } else {
+    sn_list_.expire_old(height - 1);
+  }
 
   return blk;
 }
@@ -248,7 +245,15 @@ cryptonote::transaction linear_chain_generator::create_registration_tx(const cry
                                                                        const cryptonote::keypair& sn_keys)
 {
   const sn_contributor_t contr = { acc.get_keys().m_account_address, STAKING_PORTIONS };
-  const uint32_t expires = height() + service_nodes::get_staking_requirement_lock_blocks(cryptonote::FAKECHAIN);
+  uint32_t expires = height() + service_nodes::staking_num_lock_blocks(cryptonote::FAKECHAIN);
+
+  /// Account for some inconsistency in service_nodes::staking_num_lock_blocks
+  /// on the boundary between hardforks 9 and 10
+  if (get_hf_version() == cryptonote::network_version_9_service_nodes &&
+      get_hf_version_at(expires) == cryptonote::network_version_10_bulletproofs)
+  {
+    expires += STAKING_REQUIREMENT_LOCK_BLOCKS_EXCESS;
+  }
 
   const auto reg_idx = registration_buffer_.size();
   registration_buffer_.push_back({ expires, sn_keys, contr, { height(), reg_idx } });
@@ -265,7 +270,8 @@ cryptonote::transaction linear_chain_generator::create_registration_tx()
 cryptonote::transaction linear_chain_generator::create_deregister_tx(const crypto::public_key& pk,
                                                                      uint64_t height,
                                                                      const std::vector<sn_idx>& voters,
-                                                                     uint64_t fee) const
+                                                                     uint64_t fee,
+                                                                     bool commit)
 {
 
   cryptonote::tx_extra_service_node_deregister deregister;
@@ -287,10 +293,12 @@ cryptonote::transaction linear_chain_generator::create_deregister_tx(const crypt
     const auto pk = reg->keys.pub;
     const auto sk = reg->keys.sec;
     const auto signature =
-      kredits::service_node_deregister::sign_vote(deregister.block_height, deregister.service_node_index, pk, sk);
+      service_nodes::deregister_vote::sign_vote(deregister.block_height, deregister.service_node_index, pk, sk);
 
     deregister.votes.push_back({ signature, (uint32_t)voter.idx_in_quorum });
   }
+
+  if (commit) deregistration_buffer_.push_back(pk);
 
   const auto deregister_tx = make_deregistration_tx(events_, first_miner_, blocks_.back(), deregister, gen_.m_hf_version, fee);
 
@@ -339,11 +347,26 @@ inline void sn_list::add_registrations(const std::vector<sn_registration>& regs)
   });
 }
 
+void sn_list::handle_deregistrations(const std::vector<crypto::public_key>& dereg_buffer)
+{
+  const auto size_before = sn_owners_.size();
+  auto end_it = sn_owners_.end();
+
+  for (const auto pk : dereg_buffer) {
+    end_it = std::remove_if(sn_owners_.begin(), end_it, [&pk](const sn_registration& sn) {
+      return sn.keys.pub == pk;
+    });
+  }
+
+  sn_owners_.erase(end_it, sn_owners_.end());
+  assert(sn_owners_.size() == size_before - dereg_buffer.size());
+}
+
 inline void sn_list::expire_old(uint64_t height)
 {
   /// remove_if is stable, no need for re-sorting
   const auto new_end = std::remove_if(
-    sn_owners_.begin(), sn_owners_.end(), [height](const sn_registration& reg) { return reg.valid_until < height; });
+    sn_owners_.begin(), sn_owners_.end(), [height](const sn_registration& reg) { return height > reg.valid_until; });
 
   sn_owners_.erase(new_end, sn_owners_.end());
 }
@@ -409,7 +432,7 @@ void test_generator::get_block_chain(std::vector<cryptonote::block>& blockchain,
   std::reverse(blockchain.begin(), blockchain.end());
 }
 
-void test_generator::get_last_n_block_weights(std::vector<size_t>& block_weights, const crypto::hash& head, size_t n) const
+void test_generator::get_last_n_block_weights(std::vector<uint64_t>& block_weights, const crypto::hash& head, size_t n) const
 {
   std::vector<block_info> blockchain;
   get_block_chain(blockchain, head, n);
@@ -435,7 +458,7 @@ uint64_t test_generator::get_already_generated_coins(const cryptonote::block& bl
   return get_already_generated_coins(blk_hash);
 }
 
-void test_generator::add_block(const cryptonote::block& blk, size_t txs_weight, std::vector<size_t>& block_weights, uint64_t already_generated_coins)
+void test_generator::add_block(const cryptonote::block& blk, size_t txs_weight, std::vector<uint64_t>& block_weights, uint64_t already_generated_coins)
 {
   const size_t block_weight = txs_weight + get_transaction_weight(blk.miner_tx);
 
@@ -481,7 +504,7 @@ static void manual_calc_batched_governance(const test_generator &generator, cons
 
 bool test_generator::construct_block(cryptonote::block& blk, uint64_t height, const crypto::hash& prev_id,
                                      const cryptonote::account_base& miner_acc, uint64_t timestamp, uint64_t already_generated_coins,
-                                     std::vector<size_t>& block_weights, const std::list<cryptonote::transaction>& tx_list,
+                                     std::vector<uint64_t>& block_weights, const std::list<cryptonote::transaction>& tx_list,
                                      const crypto::public_key& sn_pub_key /* = crypto::null_key */, const std::vector<sn_contributor_t>& sn_infos)
 {
   /// a temporary workaround
@@ -572,7 +595,7 @@ bool test_generator::construct_block(cryptonote::block& blk, uint64_t height, co
 
 bool test_generator::construct_block(cryptonote::block& blk, const cryptonote::account_base& miner_acc, uint64_t timestamp)
 {
-  std::vector<size_t> block_weights;
+  std::vector<uint64_t> block_weights;
   std::list<cryptonote::transaction> tx_list;
   return construct_block(blk, 0, null_hash, miner_acc, timestamp, 0, block_weights, tx_list);
 }
@@ -587,7 +610,7 @@ bool test_generator::construct_block(cryptonote::block& blk, const cryptonote::b
   // Keep difficulty unchanged
   uint64_t timestamp = blk_prev.timestamp + DIFFICULTY_BLOCKS_ESTIMATE_TIMESPAN;
   uint64_t already_generated_coins = get_already_generated_coins(prev_id);
-  std::vector<size_t> block_weights;
+  std::vector<uint64_t> block_weights;
   get_last_n_block_weights(block_weights, prev_id, CRYPTONOTE_REWARD_BLOCKS_WINDOW);
 
   return construct_block(blk, height, prev_id, miner_acc, timestamp, already_generated_coins, block_weights, tx_list, sn_pub_key, sn_infos);
@@ -609,7 +632,7 @@ bool test_generator::construct_block_manually(block& blk, const block& prev_bloc
 
   size_t height = get_block_height(prev_block) + 1;
   uint64_t already_generated_coins = get_already_generated_coins(prev_block);
-  std::vector<size_t> block_weights;
+  std::vector<uint64_t> block_weights;
   get_last_n_block_weights(block_weights, get_block_hash(prev_block), CRYPTONOTE_REWARD_BLOCKS_WINDOW);
   if (actual_params & bf_miner_tx)
   {
@@ -653,12 +676,12 @@ cryptonote::transaction make_registration_tx(std::vector<test_event_entry>& even
                                              uint8_t hf_version)
 {
     const auto new_height = cryptonote::get_block_height(head) + 1;
-    const auto staking_requirement = service_nodes::get_staking_requirement(cryptonote::FAKECHAIN, new_height);
+    const auto staking_requirement = service_nodes::get_staking_requirement(cryptonote::FAKECHAIN, new_height, hf_version);
 
     uint64_t amount = service_nodes::portions_to_amount(portions[0], staking_requirement);
 
     cryptonote::transaction tx;
-    const auto unlock_time = new_height + service_nodes::get_staking_requirement_lock_blocks(cryptonote::FAKECHAIN);
+    const auto unlock_time = new_height + service_nodes::staking_num_lock_blocks(cryptonote::FAKECHAIN);
 
     std::vector<uint8_t> extra;
     add_service_node_pubkey_to_tx_extra(extra, service_node_keys.pub);
@@ -704,8 +727,8 @@ cryptonote::transaction make_deregistration_tx(const std::vector<test_event_entr
 
   if (fee) TxBuilder(events, tx, head, account, account, amount, hf_version).with_fee(fee).with_extra(extra).with_per_output_unlock(true).build();
 
-  tx.version = cryptonote::transaction::version_3_per_output_unlock_times;
-  tx.is_deregister = true;
+  tx.version = cryptonote::transaction::get_max_version_for_hf(hf_version, cryptonote::FAKECHAIN);
+  tx.type = cryptonote::transaction::type_deregister;
 
   return tx;
 }

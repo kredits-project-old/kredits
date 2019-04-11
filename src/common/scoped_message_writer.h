@@ -39,6 +39,8 @@
   #define PAUSE_READLINE()
 #endif
 
+#include "common/kredits_integration_test_hooks.h"
+
 namespace tools
 {
 
@@ -65,6 +67,9 @@ public:
     , m_bright(bright)
     , m_log_level(log_level)
   {
+#if defined(KREDITS_ENABLE_INTEGRATION_TEST_HOOKS)
+    m_color = epee::console_color_default; // NOTE(kredits): No ANSI color codes in the output. Makes parsing harder.
+#endif
     m_oss << prefix;
   }
 
@@ -93,28 +98,7 @@ public:
     return m_oss;
   }
 
-  ~scoped_message_writer()
-  {
-    if (m_flush)
-    {
-      m_flush = false;
-
-      MCLOG_FILE(m_log_level, "msgwriter", m_oss.str());
-
-      if (epee::console_color_default == m_color)
-      {
-        std::cout << m_oss.str();
-      }
-      else
-      {
-        PAUSE_READLINE();
-        set_console_color(m_color, m_bright);
-        std::cout << m_oss.str();
-        epee::reset_console_color();
-      }
-      std::cout << std::endl;
-    }
-  }
+  ~scoped_message_writer();
 };
 
 inline scoped_message_writer success_msg_writer(bool color = true)

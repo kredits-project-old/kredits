@@ -37,7 +37,7 @@ using namespace cryptonote;
 namespace
 {
   bool construct_miner_tx_by_weight(transaction& miner_tx, uint64_t height, uint64_t already_generated_coins,
-    const account_public_address& miner_address, std::vector<size_t>& block_weights, size_t target_tx_weight,
+    const account_public_address& miner_address, std::vector<uint64_t>& block_weights, size_t target_tx_weight,
     size_t target_block_weight, uint64_t fee = 0)
   {
     if (!construct_miner_tx(height, misc_utils::median(block_weights), already_generated_coins, target_block_weight, fee, miner_address, miner_tx))
@@ -74,7 +74,7 @@ namespace
   bool construct_max_weight_block(test_generator& generator, block& blk, const block& blk_prev, const account_base& miner_account,
     size_t median_block_count = CRYPTONOTE_REWARD_BLOCKS_WINDOW)
   {
-    std::vector<size_t> block_weights;
+    std::vector<uint64_t> block_weights;
     generator.get_last_n_block_weights(block_weights, get_block_hash(blk_prev), median_block_count);
 
     size_t median = misc_utils::median(block_weights);
@@ -190,7 +190,7 @@ bool gen_block_reward::generate(std::vector<test_event_entry>& events) const
     size_t txs_1_weight = get_transaction_weight(tx_1) + get_transaction_weight(tx_2);
     uint64_t txs_fee = get_tx_fee(tx_1) + get_tx_fee(tx_2);
 
-    std::vector<size_t> block_weights;
+    std::vector<uint64_t> block_weights;
     generator.get_last_n_block_weights(block_weights, get_block_hash(blk_7), CRYPTONOTE_REWARD_BLOCKS_WINDOW);
     size_t median = misc_utils::median(block_weights);
 
@@ -281,12 +281,12 @@ gen_batched_governance_reward::gen_batched_governance_reward()
 static uint64_t expected_total_governance_paid = 0;
 bool gen_batched_governance_reward::generate(std::vector<test_event_entry>& events) const
 {
-  const get_test_options<gen_batched_governance_reward> test_options = {};
   const config_t &network = cryptonote::get_config(cryptonote::FAKECHAIN, network_version_10_bulletproofs);
 
-  linear_chain_generator batched_governance_generator(events);
+  const get_test_options<gen_batched_governance_reward> test_options = {};
+  linear_chain_generator batched_governance_generator(events, test_options.hard_forks);
   {
-    batched_governance_generator.rewind_until_version(test_options.hard_forks, network_version_10_bulletproofs);
+    batched_governance_generator.rewind_until_version(network_version_10_bulletproofs);
 
     uint64_t blocks_to_gen = network.GOVERNANCE_REWARD_INTERVAL_IN_BLOCKS - batched_governance_generator.height();
     batched_governance_generator.rewind_blocks_n(blocks_to_gen);
@@ -297,8 +297,8 @@ bool gen_batched_governance_reward::generate(std::vector<test_event_entry>& even
     // you don't atleast progress and generate blocks from hf8 you will run into
     // problems
     std::vector<test_event_entry> unused_events;
-    linear_chain_generator no_batched_governance_generator(unused_events);
-    no_batched_governance_generator.rewind_until_version(test_options.hard_forks, network_version_9_service_nodes);
+    linear_chain_generator no_batched_governance_generator(unused_events, test_options.hard_forks);
+    no_batched_governance_generator.rewind_until_version(network_version_9_service_nodes);
 
     while(no_batched_governance_generator.height() < batched_governance_generator.height())
       no_batched_governance_generator.create_block();

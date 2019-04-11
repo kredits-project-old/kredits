@@ -1,6 +1,6 @@
 // Copyright (c) 2014-2018, The Monero Project
 // Copyright (c)      2018, The Loki Project
-// Copyright (c)      2018, Kredits Project
+// Copyright (c)      2018, The Kredits Project
 //
 // All rights reserved.
 //

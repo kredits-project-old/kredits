@@ -31,7 +31,6 @@
 #include "password.h"
 
 #include <iostream>
-#include <memory.h>
 #include <stdio.h>
 
 #if defined(_WIN32)
@@ -42,9 +41,9 @@
 #include <unistd.h>
 #endif
 
-#include "memwipe.h"
-
 #define EOT 0x4
+
+#include "common/kredits_integration_test_hooks.h"
 
 namespace
 {
@@ -118,6 +117,7 @@ namespace
 
 #else // end WIN32 
 
+#if !defined(KREDITS_ENABLE_INTEGRATION_TEST_HOOKS)
   bool is_cin_tty() noexcept
   {
     return 0 != isatty(fileno(stdin));
@@ -179,9 +179,11 @@ namespace
 
     return true;
   }
+#endif // !defined(KREDITS_ENABLE_INTEGRATION_TEST_HOOKS)
 
 #endif // end !WIN32
 
+#if !defined(KREDITS_ENABLE_INTEGRATION_TEST_HOOKS)
   bool read_from_tty(const bool verify, const char *message, bool hide_input, epee::wipeable_string& pass1, epee::wipeable_string& pass2)
   {
     while (true)
@@ -233,6 +235,7 @@ namespace
     }
     return true;
   }
+#endif // !defined(KREDITS_ENABLE_INTEGRATION_TEST_HOOKS)
 
 } // anonymous namespace
 
@@ -258,6 +261,9 @@ namespace tools
 
   boost::optional<password_container> password_container::prompt(const bool verify, const char *message, bool hide_input)
   {
+#if defined(KREDITS_ENABLE_INTEGRATION_TEST_HOOKS)
+    return password_container(std::string(""));
+#else
     is_prompting = true;
     password_container pass1{};
     password_container pass2{};
@@ -269,6 +275,7 @@ namespace tools
 
     is_prompting = false;
     return boost::none;
+#endif
   }
 
   boost::optional<login> login::parse(std::string&& userpass, bool verify, const std::function<boost::optional<password_container>(bool)> &prompt)

@@ -1,5 +1,5 @@
 # Copyright (c) 2018, The Kredits Project
-# Copyright (c) 2018, The Loki Project
+# Copyright (c) 2018, The loki Project
 # Copyright (c) 2014-2018, The Monero Project
 #
 # All rights reserved.
@@ -34,7 +34,7 @@ set(cryptonote_core_sources
   service_node_rules.cpp
   service_node_list.cpp
   service_node_deregister.cpp
-  quorum_cop.cpp
+  service_node_quorum_cop.cpp
   tx_pool.cpp
   cryptonote_tx_utils.cpp)
 
@@ -45,7 +45,7 @@ set(cryptonote_core_private_headers
   blockchain.h
   service_node_rules.h
   service_node_list.h
-  quorum_cop.h
+  service_node_quorum_cop.h
   cryptonote_core.h
   service_node_deregister.h
   tx_pool.h

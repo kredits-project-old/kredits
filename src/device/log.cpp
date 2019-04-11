@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2018, The Monero Project
+// Copyright (c) 2017-2018, The Monero Project
 // Copyright (c)      2018, The Loki Project
 // Copyright (c)      2018, The Kredits Project
 // 
@@ -68,7 +68,7 @@ namespace hw {
 
 
     void decrypt(char* buf, size_t len) {
-      #ifdef IODUMMYCRYPT_HWDEVICE
+      #if defined(IODUMMYCRYPT_HWDEVICE) || defined(IONOCRYPT_HWDEVICE)
       size_t i;
       if (len == 32) {
         //view key?
@@ -88,10 +88,12 @@ namespace hw {
           return;
         }
       }
+      #if defined(IODUMMYCRYPT_HWDEVICE)
       //std decrypt: XOR.55h
       for (i = 0; i<len;i++) {
           buf[i] ^= 0x55;
         }
+      #endif
       #endif
     }
 

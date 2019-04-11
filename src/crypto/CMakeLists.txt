@@ -1,5 +1,5 @@
 # Copyright (c) 2018, The Kredits Project
-# Copyright (c) 2018, The Loki Project
+# Copyright (c) 2018, The loki Project
 # Copyright (c) 2014-2018, The Monero Project
 #
 # All rights reserved.
@@ -46,9 +46,10 @@ set(crypto_sources
   oaes_lib.c
   random.c
   skein.c
-  cn_slow_hash_hard_arm.cpp
-  cn_slow_hash_hard_intel.cpp
-  cn_slow_hash_soft.cpp
+  cn_heavy_hash_hard_arm.cpp
+  cn_heavy_hash_hard_intel.cpp
+  cn_heavy_hash_soft.cpp
+  cn_turtle_hash.c
   tree-hash.c)
 
 set(crypto_headers)
@@ -71,7 +72,7 @@ set(crypto_private_headers
   random.h
   skein.h
   skein_port.h
-  cn_slow_hash.hpp)
+  cn_heavy_hash.hpp)
 
 kredits_private_headers(cncrypto
   ${crypto_private_headers})

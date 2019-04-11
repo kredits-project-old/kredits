@@ -1,23 +1,23 @@
 // Copyright (c) 2014-2018, The Monero Project
 // Copyright (c)      2018, The Loki Project
-// Copyright (c)      2018, Kredits Project
-// 
+// Copyright (c)      2018, The Kredits Project
+//
 // All rights reserved.
-// 
+//
 // Redistribution and use in source and binary forms, with or without modification, are
 // permitted provided that the following conditions are met:
-// 
+//
 // 1. Redistributions of source code must retain the above copyright notice, this list of
 //    conditions and the following disclaimer.
-// 
+//
 // 2. Redistributions in binary form must reproduce the above copyright notice, this list
 //    of conditions and the following disclaimer in the documentation and/or other
 //    materials provided with the distribution.
-// 
+//
 // 3. Neither the name of the copyright holder nor the names of its contributors may be
 //    used to endorse or promote products derived from this software without specific
 //    prior written permission.
-// 
+//
 // THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY
 // EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
 // MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL
@@ -33,12 +33,16 @@
 #include "string_tools.h"
 #include "common/password.h"
 #include "common/scoped_message_writer.h"
+#include "common/pruning.h"
 #include "daemon/rpc_command_executor.h"
-#include "common/int-util.h"
+#include "int-util.h"
 #include "rpc/core_rpc_server_commands_defs.h"
 #include "cryptonote_core/cryptonote_core.h"
+#include "cryptonote_core/service_node_rules.h"
 #include "cryptonote_basic/hardfork.h"
 #include <boost/format.hpp>
+
+#include "common/kredits_integration_test_hooks.h"
 
 #include <fstream>
 #include <ctime>
@@ -51,6 +55,63 @@
 namespace daemonize {
 
 namespace {
+
+  enum class input_line_result { yes, no, cancel, back, };
+
+  std::string input_line(std::string const &prompt)
+  {
+    std::cout << prompt << std::flush;
+    std::string result;
+#if defined (KREDITS_ENABLE_INTEGRATION_TEST_HOOKS)
+    kredits::write_redirected_stdout_to_shared_mem();
+    kredits::fixed_buffer buffer = kredits::read_from_stdin_shared_mem();
+    result.reserve(buffer.len);
+    result = buffer.data;
+#else
+  #ifdef HAVE_READLINE
+    rdln::suspend_readline pause_readline;
+  #endif
+    std::cin >> result;
+#endif
+
+    return result;
+  }
+
+  input_line_result input_line_yes_no_back_cancel(char const *msg)
+  {
+    std::string prompt = std::string(msg);
+    prompt += " (Y/Yes/N/No/B/Back/C/Cancel): ";
+    std::string input = input_line(prompt);
+
+    if (command_line::is_yes(input))  return input_line_result::yes;
+    if (command_line::is_no(input))   return input_line_result::no;
+    if (command_line::is_back(input)) return input_line_result::back;
+    return input_line_result::cancel;
+  }
+
+  input_line_result input_line_yes_no_cancel(char const *msg)
+  {
+    std::string prompt = msg;
+    prompt += " (Y/Yes/N/No/C/Cancel): ";
+    std::string input = input_line(prompt);
+
+    if (command_line::is_yes(input)) return input_line_result::yes;
+    if (command_line::is_no(input))  return input_line_result::no;
+    return input_line_result::cancel;
+  }
+
+
+  input_line_result input_line_back_cancel_get_input(char const *msg, std::string &input)
+  {
+    std::string prompt = msg;
+    prompt += " (B/Back/C/Cancel): ";
+    input   = input_line(prompt);
+
+    if (command_line::is_back(input))   return input_line_result::back;
+    if (command_line::is_cancel(input)) return input_line_result::cancel;
+    return input_line_result::yes;
+  }
+
   void print_peer(std::string const & prefix, cryptonote::peer const & peer)
   {
     time_t now;
@@ -66,13 +127,14 @@ namespace {
     peer_id_str >> id_str;
     epee::string_tools::xtype_to_string(peer.port, port_str);
     std::string addr_str = ip_str + ":" + port_str;
-    tools::msg_writer() << boost::format("%-10s %-25s %-25s %s") % prefix % id_str % addr_str % elapsed;
+    std::string pruning_seed = epee::string_tools::to_string_hex(peer.pruning_seed);
+    tools::msg_writer() << boost::format("%-10s %-25s %-25s %-4s %s") % prefix % id_str % addr_str % pruning_seed % elapsed;
   }
 
   void print_block_header(cryptonote::block_header_response const & header)
   {
     tools::success_msg_writer()
-      << "timestamp: " << boost::lexical_cast<std::string>(header.timestamp) << std::endl
+      << "timestamp: " << boost::lexical_cast<std::string>(header.timestamp) << " (" << tools::get_human_readable_timestamp(header.timestamp) << ")" << std::endl
       << "previous hash: " << header.prev_hash << std::endl
       << "nonce: " << boost::lexical_cast<std::string>(header.nonce) << std::endl
       << "is orphan: " << header.orphan_status << std::endl
@@ -83,6 +145,7 @@ namespace {
       << "POW hash: " << header.pow_hash << std::endl
       << "block size: " << header.block_size << std::endl
       << "block weight: " << header.block_weight << std::endl
+      << "long term weight: " << header.long_term_weight << std::endl
       << "num txes: " << header.num_txes << std::endl
       << "reward: " << cryptonote::print_money(header.reward);
   }
@@ -94,30 +157,25 @@ namespace {
     time_t dt = t > now ? t - now : now - t;
     std::string s;
     if (dt < 90)
-      s = boost::lexical_cast<std::string>(dt) + " seconds";
+      s = boost::lexical_cast<std::string>(dt) + (dt == 1 ? " second" : " seconds");
     else if (dt < 90 * 60)
-      s = boost::lexical_cast<std::string>(dt/60) + " minutes";
+      s = (boost::format("%.1f minutes") % ((float)dt/60)).str();
     else if (dt < 36 * 3600)
-      s = boost::lexical_cast<std::string>(dt/3600) + " hours";
+      s = (boost::format("%.1f hours") % ((float)dt/3600)).str();
     else
-      s = boost::lexical_cast<std::string>(dt/(3600*24)) + " days";
+      s = (boost::format("%.1f days") % ((float)dt/(3600*24))).str();
     return s + " " + (t > now ? "in the future" : "ago");
   }
 
   char const *get_date_time(time_t t)
   {
-      static char buf[128];
-      buf[0] = 0;
+    static char buf[128];
+    buf[0] = 0;
 
-      struct tm tm;
-#ifdef WIN32
-      gmtime_s(&tm, &t);
-#else
-      gmtime_r(&t, &tm);
-#endif
-
-      strftime(buf, sizeof(buf), "%Y-%m-%d %I:%M:%S %p", &tm);
-      return buf;
+    struct tm tm;
+    epee::misc_utils::get_gmt_time(t, tm);
+    strftime(buf, sizeof(buf), "%Y-%m-%d %I:%M:%S %p", &tm);
+    return buf;
   }
 
   std::string get_time_hms(time_t t)
@@ -132,6 +190,7 @@ namespace {
     snprintf(buffer, sizeof(buffer), "%02u:%02u:%02u", hours, minutes, seconds);
     return std::string(buffer);
   }
+
 
   std::string make_error(const std::string &base, const std::string &status)
   {
@@ -176,7 +235,7 @@ t_rpc_command_executor::~t_rpc_command_executor()
   }
 }
 
-bool t_rpc_command_executor::print_peer_list() {
+bool t_rpc_command_executor::print_peer_list(bool white, bool gray, size_t limit) {
   cryptonote::COMMAND_RPC_GET_PEER_LIST::request req;
   cryptonote::COMMAND_RPC_GET_PEER_LIST::response res;
 
@@ -197,14 +256,24 @@ bool t_rpc_command_executor::print_peer_list() {
     }
   }
 
-  for (auto & peer : res.white_list)
+  if (white)
   {
-    print_peer("white", peer);
+    auto peer = res.white_list.cbegin();
+    const auto end = limit ? peer + std::min(limit, res.white_list.size()) : res.white_list.cend();
+    for (; peer != end; ++peer)
+    {
+      print_peer("white", *peer);
+    }
   }
 
-  for (auto & peer : res.gray_list)
+  if (gray)
   {
-    print_peer("gray", peer);
+    auto peer = res.gray_list.cbegin();
+    const auto end = limit ? peer + std::min(limit, res.gray_list.size()) : res.gray_list.cend();
+    for (; peer != end; ++peer)
+    {
+      print_peer("gray", *peer);
+    }
   }
 
   return true;
@@ -521,13 +590,13 @@ bool t_rpc_command_executor::print_connections() {
 
   tools::msg_writer() << std::setw(30) << std::left << "Remote Host"
       << std::setw(20) << "Peer id"
-      << std::setw(20) << "Support Flags"      
+      << std::setw(20) << "Support Flags"
       << std::setw(30) << "Recv/Sent (inactive,sec)"
       << std::setw(25) << "State"
       << std::setw(20) << "Livetime(sec)"
       << std::setw(12) << "Down (kB/s)"
       << std::setw(14) << "Down(now)"
-      << std::setw(10) << "Up (kB/s)" 
+      << std::setw(10) << "Up (kB/s)"
       << std::setw(13) << "Up(now)"
       << std::endl;
 
@@ -536,7 +605,7 @@ bool t_rpc_command_executor::print_connections() {
     std::string address = info.incoming ? "INC " : "OUT ";
     address += info.ip + ":" + info.port;
     //std::string in_out = info.incoming ? "INC " : "OUT ";
-    tools::msg_writer() 
+    tools::msg_writer()
      //<< std::setw(30) << std::left << in_out
      << std::setw(30) << std::left << address
      << std::setw(20) << epee::string_tools::pad_string(info.peer_id, 16, '0', true)
@@ -548,11 +617,11 @@ bool t_rpc_command_executor::print_connections() {
      << std::setw(14) << info.current_download
      << std::setw(10) << info.avg_upload
      << std::setw(13) << info.current_upload
-     
+
      << std::left << (info.localhost ? "[LOCALHOST]" : "")
      << std::left << (info.local_ip ? "[LAN]" : "");
     //tools::msg_writer() << boost::format("%-25s peer_id: %-25s %s") % address % info.peer_id % in_out;
-    
+
   }
 
   return true;
@@ -589,9 +658,9 @@ bool t_rpc_command_executor::print_blockchain_info(uint64_t start_block_index, u
   for (auto & header : res.headers)
   {
     if (!first)
-      std::cout << std::endl;
-    std::cout
-      << "height: " << header.height << ", timestamp: " << header.timestamp
+      tools::msg_writer() << "" << std::endl;
+    tools::msg_writer()
+      << "height: " << header.height << ", timestamp: " << header.timestamp << " (" << tools::get_human_readable_timestamp(header.timestamp) << ")"
       << ", size: " << header.block_size << ", weight: " << header.block_weight << ", transactions: " << header.num_txes << std::endl
       << "major version: " << (unsigned)header.major_version << ", minor version: " << (unsigned)header.minor_version << std::endl
       << "block id: " << header.hash << ", previous block id: " << header.prev_hash << std::endl
@@ -729,7 +798,7 @@ bool t_rpc_command_executor::print_height() {
   return true;
 }
 
-bool t_rpc_command_executor::print_block_by_hash(crypto::hash block_hash) {
+bool t_rpc_command_executor::print_block_by_hash(crypto::hash block_hash, bool include_hex) {
   cryptonote::COMMAND_RPC_GET_BLOCK::request req;
   cryptonote::COMMAND_RPC_GET_BLOCK::response res;
   epee::json_rpc::error error_resp;
@@ -755,13 +824,15 @@ bool t_rpc_command_executor::print_block_by_hash(crypto::hash block_hash) {
     }
   }
 
+  if (include_hex)
+    tools::success_msg_writer() << res.blob << std::endl;
   print_block_header(res.block_header);
   tools::success_msg_writer() << res.json << ENDL;
 
   return true;
 }
 
-bool t_rpc_command_executor::print_block_by_height(uint64_t height) {
+bool t_rpc_command_executor::print_block_by_height(uint64_t height, bool include_hex) {
   cryptonote::COMMAND_RPC_GET_BLOCK::request req;
   cryptonote::COMMAND_RPC_GET_BLOCK::response res;
   epee::json_rpc::error error_resp;
@@ -787,6 +858,8 @@ bool t_rpc_command_executor::print_block_by_height(uint64_t height) {
     }
   }
 
+  if (include_hex)
+    tools::success_msg_writer() << res.blob << std::endl;
   print_block_header(res.block_header);
   tools::success_msg_writer() << res.json << ENDL;
 
@@ -803,6 +876,7 @@ bool t_rpc_command_executor::print_transaction(crypto::hash transaction_hash,
 
   req.txs_hashes.push_back(epee::string_tools::pod_to_hex(transaction_hash));
   req.decode_as_json = false;
+  req.split = true;
   req.prune = false;
   if (m_is_rpc)
   {
@@ -828,13 +902,25 @@ bool t_rpc_command_executor::print_transaction(crypto::hash transaction_hash,
       if (res.txs.front().in_pool)
         tools::success_msg_writer() << "Found in pool";
       else
-        tools::success_msg_writer() << "Found in blockchain at height " << res.txs.front().block_height;
+        tools::success_msg_writer() << "Found in blockchain at height " << res.txs.front().block_height << (res.txs.front().prunable_as_hex.empty() ? " (pruned)" : "");
     }
 
     const std::string &as_hex = (1 == res.txs.size()) ? res.txs.front().as_hex : res.txs_as_hex.front();
+    const std::string &pruned_as_hex = (1 == res.txs.size()) ? res.txs.front().pruned_as_hex : "";
+    const std::string &prunable_as_hex = (1 == res.txs.size()) ? res.txs.front().prunable_as_hex : "";
     // Print raw hex if requested
     if (include_hex)
-      tools::success_msg_writer() << as_hex << std::endl;
+    {
+      if (!as_hex.empty())
+      {
+        tools::success_msg_writer() << as_hex << std::endl;
+      }
+      else
+      {
+        std::string output = pruned_as_hex + prunable_as_hex;
+        tools::success_msg_writer() << output << std::endl;
+      }
+    }
 
     // Print json if requested
     if (include_json)
@@ -842,17 +928,27 @@ bool t_rpc_command_executor::print_transaction(crypto::hash transaction_hash,
       crypto::hash tx_hash, tx_prefix_hash;
       cryptonote::transaction tx;
       cryptonote::blobdata blob;
-      if (!string_tools::parse_hexstr_to_binbuff(as_hex, blob))
+      std::string source = as_hex.empty() ? pruned_as_hex + prunable_as_hex : as_hex;
+      bool pruned = !pruned_as_hex.empty() && prunable_as_hex.empty();
+      if (!string_tools::parse_hexstr_to_binbuff(source, blob))
       {
         tools::fail_msg_writer() << "Failed to parse tx to get json format";
       }
-      else if (!cryptonote::parse_and_validate_tx_from_blob(blob, tx, tx_hash, tx_prefix_hash))
-      {
-        tools::fail_msg_writer() << "Failed to parse tx blob to get json format";
-      }
       else
       {
-        tools::success_msg_writer() << cryptonote::obj_to_json_str(tx) << std::endl;
+        bool ret;
+        if (pruned)
+          ret = cryptonote::parse_and_validate_tx_base_from_blob(blob, tx);
+        else
+          ret = cryptonote::parse_and_validate_tx_from_blob(blob, tx);
+        if (!ret)
+        {
+          tools::fail_msg_writer() << "Failed to parse tx blob to get json format";
+        }
+        else
+        {
+          tools::success_msg_writer() << cryptonote::obj_to_json_str(tx) << std::endl;
+        }
       }
     }
   }
@@ -915,7 +1011,7 @@ bool t_rpc_command_executor::print_transaction_pool_long() {
   }
   else
   {
-    if (!m_rpc_server->on_get_transaction_pool(req, res, false) || res.status != CORE_RPC_STATUS_OK)
+    if (!m_rpc_server->on_get_transaction_pool(req, res) || res.status != CORE_RPC_STATUS_OK)
     {
       tools::fail_msg_writer() << make_error(fail_message, res.status);
       return true;
@@ -1001,7 +1097,7 @@ bool t_rpc_command_executor::print_transaction_pool_short() {
   }
   else
   {
-    if (!m_rpc_server->on_get_transaction_pool(req, res, false) || res.status != CORE_RPC_STATUS_OK)
+    if (!m_rpc_server->on_get_transaction_pool(req, res) || res.status != CORE_RPC_STATUS_OK)
     {
       tools::fail_msg_writer() << make_error(fail_message, res.status);
       return true;
@@ -1059,7 +1155,7 @@ bool t_rpc_command_executor::print_transaction_pool_stats() {
   else
   {
     res.pool_stats = {};
-    if (!m_rpc_server->on_get_transaction_pool_stats(req, res, false) || res.status != CORE_RPC_STATUS_OK)
+    if (!m_rpc_server->on_get_transaction_pool_stats(req, res) || res.status != CORE_RPC_STATUS_OK)
     {
       tools::fail_msg_writer() << make_error(fail_message, res.status);
       return true;
@@ -1129,7 +1225,7 @@ bool t_rpc_command_executor::start_mining(cryptonote::account_public_address add
   req.threads_count = num_threads;
   req.do_background_mining = do_background_mining;
   req.ignore_battery = ignore_battery;
-  
+
   std::string fail_message = "Mining did not start";
 
   if (m_is_rpc)
@@ -1356,11 +1452,11 @@ bool t_rpc_command_executor::out_peers(uint64_t limit)
 {
 	cryptonote::COMMAND_RPC_OUT_PEERS::request req;
 	cryptonote::COMMAND_RPC_OUT_PEERS::response res;
-	
+
 	epee::json_rpc::error error_resp;
 
 	req.out_peers = limit;
-	
+
 	std::string fail_message = "Unsuccessful";
 
 	if (m_is_rpc)
@@ -1379,7 +1475,7 @@ bool t_rpc_command_executor::out_peers(uint64_t limit)
 		}
 	}
 
-	std::cout << "Max number of out peers set to " << limit << std::endl;
+	tools::msg_writer() << "Max number of out peers set to " << limit << std::endl;
 
 	return true;
 }
@@ -1411,7 +1507,7 @@ bool t_rpc_command_executor::in_peers(uint64_t limit)
 		}
 	}
 
-	std::cout << "Max number of in peers set to " << limit << std::endl;
+	tools::msg_writer() << "Max number of in peers set to " << limit << std::endl;
 
 	return true;
 }
@@ -1421,7 +1517,7 @@ bool t_rpc_command_executor::start_save_graph()
 	cryptonote::COMMAND_RPC_START_SAVE_GRAPH::request req;
 	cryptonote::COMMAND_RPC_START_SAVE_GRAPH::response res;
 	std::string fail_message = "Unsuccessful";
-	
+
 	if (m_is_rpc)
 	{
 		if (!m_rpc_client->rpc_request(req, res, "/start_save_graph", fail_message.c_str()))
@@ -1429,7 +1525,7 @@ bool t_rpc_command_executor::start_save_graph()
 			return true;
 		}
 	}
-	
+
 	else
     {
 		if (!m_rpc_server->on_start_save_graph(req, res) || res.status != CORE_RPC_STATUS_OK)
@@ -1438,7 +1534,7 @@ bool t_rpc_command_executor::start_save_graph()
 			return true;
 		}
 	}
-	
+
 	tools::success_msg_writer() << "Saving graph is now on";
 	return true;
 }
@@ -1448,7 +1544,7 @@ bool t_rpc_command_executor::stop_save_graph()
 	cryptonote::COMMAND_RPC_STOP_SAVE_GRAPH::request req;
 	cryptonote::COMMAND_RPC_STOP_SAVE_GRAPH::response res;
 	std::string fail_message = "Unsuccessful";
-	
+
 	if (m_is_rpc)
 	{
 		if (!m_rpc_client->rpc_request(req, res, "/stop_save_graph", fail_message.c_str()))
@@ -1456,7 +1552,7 @@ bool t_rpc_command_executor::stop_save_graph()
 			return true;
 		}
 	}
-	
+
 	else
     {
 		if (!m_rpc_server->on_stop_save_graph(req, res) || res.status != CORE_RPC_STATUS_OK)
@@ -1705,7 +1801,7 @@ bool t_rpc_command_executor::print_coinbase_tx_sum(uint64_t height, uint64_t cou
   tools::msg_writer() << "Sum of coinbase transactions between block heights ["
     << height << ", " << (height + count) << ") is "
     << cryptonote::print_money(res.emission_amount + res.fee_amount) << " "
-    << "consisting of " << cryptonote::print_money(res.emission_amount) 
+    << "consisting of " << cryptonote::print_money(res.emission_amount)
     << " in emissions, and " << cryptonote::print_money(res.fee_amount) << " in fees";
   return true;
 }
@@ -2001,6 +2097,8 @@ bool t_rpc_command_executor::sync_info()
     for (const auto &p: res.peers)
       current_download += p.info.current_download;
     tools::success_msg_writer() << "Downloading at " << current_download << " kB/s";
+    if (res.next_needed_pruning_seed)
+      tools::success_msg_writer() << "Next needed pruning seed: " << res.next_needed_pruning_seed;
 
     tools::success_msg_writer() << std::to_string(res.peers.size()) << " peers";
     for (const auto &p: res.peers)
@@ -2008,135 +2106,171 @@ bool t_rpc_command_executor::sync_info()
       std::string address = epee::string_tools::pad_string(p.info.address, 24);
       uint64_t nblocks = 0, size = 0;
       for (const auto &s: res.spans)
-        if (s.rate > 0.0f && s.connection_id == p.info.connection_id)
+        if (s.connection_id == p.info.connection_id)
           nblocks += s.nblocks, size += s.size;
-      tools::success_msg_writer() << address << "  " << epee::string_tools::pad_string(p.info.peer_id, 16, '0', true) << "  " << epee::string_tools::pad_string(p.info.state, 16) << "  " << p.info.height << "  "  << p.info.current_download << " kB/s, " << nblocks << " blocks / " << size/1e6 << " MB queued";
+      tools::success_msg_writer() << address << "  " << epee::string_tools::pad_string(p.info.peer_id, 16, '0', true) << "  " <<
+          epee::string_tools::pad_string(p.info.state, 16) << "  " <<
+          epee::string_tools::pad_string(epee::string_tools::to_string_hex(p.info.pruning_seed), 8) << "  " << p.info.height << "  "  <<
+          p.info.current_download << " kB/s, " << nblocks << " blocks / " << size/1e6 << " MB queued";
     }
 
     uint64_t total_size = 0;
     for (const auto &s: res.spans)
       total_size += s.size;
     tools::success_msg_writer() << std::to_string(res.spans.size()) << " spans, " << total_size/1e6 << " MB";
+    tools::success_msg_writer() << res.overview;
     for (const auto &s: res.spans)
     {
       std::string address = epee::string_tools::pad_string(s.remote_address, 24);
+      std::string pruning_seed = epee::string_tools::to_string_hex(tools::get_pruning_seed(s.start_block_height, std::numeric_limits<uint64_t>::max(), CRYPTONOTE_PRUNING_LOG_STRIPES));
       if (s.size == 0)
       {
-        tools::success_msg_writer() << address << "  " << s.nblocks << " (" << s.start_block_height << " - " << (s.start_block_height + s.nblocks - 1) << ")  -";
+        tools::success_msg_writer() << address << "  " << s.nblocks << "/" << pruning_seed << " (" << s.start_block_height << " - " << (s.start_block_height + s.nblocks - 1) << ")  -";
       }
       else
       {
-        tools::success_msg_writer() << address << "  " << s.nblocks << " (" << s.start_block_height << " - " << (s.start_block_height + s.nblocks - 1) << ", " << (uint64_t)(s.size/1e3) << " kB)  " << (unsigned)(s.rate/1e3) << " kB/s (" << s.speed/100.0f << ")";
+        tools::success_msg_writer() << address << "  " << s.nblocks << "/" << pruning_seed << " (" << s.start_block_height << " - " << (s.start_block_height + s.nblocks - 1) << ", " << (uint64_t)(s.size/1e3) << " kB)  " << (unsigned)(s.rate/1e3) << " kB/s (" << s.speed/100.0f << ")";
       }
     }
 
     return true;
 }
 
-bool t_rpc_command_executor::get_service_node_registration_cmd(const std::vector<std::string> &args)
-{
-    cryptonote::COMMAND_RPC_GET_SERVICE_NODE_REGISTRATION_CMD::request req;
-    cryptonote::COMMAND_RPC_GET_SERVICE_NODE_REGISTRATION_CMD::response res;
-    std::string fail_message = "Unsuccessful";
-    epee::json_rpc::error error_resp;
-
-    req.args = args;
-    req.make_friendly = !m_is_rpc;
-    if (m_is_rpc)
-    {
-      if (!m_rpc_client->json_rpc_request(req, res, "get_service_node_registration_cmd", fail_message.c_str()))
-      {
-          tools::fail_msg_writer() << make_error(fail_message, res.status);
-          return true;
-      }
-    }
-    else
-    {
-      if (!m_rpc_server->on_get_service_node_registration_cmd(req, res, error_resp) || res.status != CORE_RPC_STATUS_OK)
-      {
-          tools::fail_msg_writer() << make_error(fail_message, error_resp.message);
-          return true;
-      }
-    }
-
-    tools::success_msg_writer() << res.registration_cmd;
-
-    return true;
-}
-
-static void print_service_node_list_state(cryptonote::network_type nettype, int hard_fork_version, uint64_t *curr_height, std::vector<cryptonote::COMMAND_RPC_GET_SERVICE_NODES::response::entry *> list)
+static void append_printable_service_node_list_entry(cryptonote::network_type nettype, int hard_fork_version, uint64_t curr_height, uint64_t entry_index, cryptonote::COMMAND_RPC_GET_SERVICE_NODES::response::entry const &entry, std::string &buffer)
 {
   const char indent1[] = "    ";
   const char indent2[] = "        ";
   const char indent3[] = "            ";
+  bool is_registered = entry.total_contributed >= entry.staking_requirement;
 
-  for (size_t i = 0; i < list.size(); ++i)
+  // Print Funding Status
   {
-    const cryptonote::COMMAND_RPC_GET_SERVICE_NODES::response::entry &entry = *list[i];
+    buffer.append(indent1);
+    buffer.append("[");
+    buffer.append(std::to_string(entry_index));
+    buffer.append("] Service Node: ");
+    buffer.append(entry.service_node_pubkey);
+    buffer.append("\n");
 
-    bool is_registered = entry.total_contributed >= entry.staking_requirement;
-    epee::console_colors color = is_registered ? console_color_green : epee::console_color_yellow;
+    buffer.append(indent2);
+    buffer.append("Total Contributed/Staking Requirement: ");
+    buffer.append(cryptonote::print_money(entry.total_contributed));
+    buffer.append("/");
+    buffer.append(cryptonote::print_money(entry.staking_requirement));
+    buffer.append("\n");
 
-    // Print Funding Status
+    buffer.append(indent2);
+    buffer.append("Total Reserved: ");
+    buffer.append(cryptonote::print_money(entry.total_reserved));
+    buffer.append("\n");
+  }
+
+  // Print expiry information
+  {
+    uint64_t const now = time(nullptr);
+    uint64_t expiry_height = 0;
+    if (hard_fork_version >= cryptonote::network_version_11_infinite_staking)
     {
-      tools::msg_writer(color) << indent1 << "[" << i << "] Service Node: "            << entry.service_node_pubkey;
-      tools::msg_writer()      << indent2 << "Total Contributed/Staking Requirement: " << cryptonote::print_money(entry.total_contributed) << "/" << cryptonote::print_money(entry.staking_requirement);
-      tools::msg_writer()      << indent2 << "Total Reserved: "                        << cryptonote::print_money(entry.total_reserved);
+      expiry_height = entry.requested_unlock_height;
     }
-
-    // Print Expiry Info
+    else if (hard_fork_version >= cryptonote::network_version_10_bulletproofs)
     {
-      uint64_t expiry_height = entry.registration_height + service_nodes::get_staking_requirement_lock_blocks(nettype);
-      if (hard_fork_version >= cryptonote::network_version_10_bulletproofs)
+        expiry_height = entry.registration_height + service_nodes::staking_num_lock_blocks(nettype);
         expiry_height += STAKING_REQUIREMENT_LOCK_BLOCKS_EXCESS;
-
-      if (curr_height)
-      {
-        uint64_t now = time(nullptr);
-        uint64_t delta_height = expiry_height - *curr_height;
-        uint64_t expiry_epoch_time = now + (delta_height * DIFFICULTY_TARGET_V2);
-
-        tools::msg_writer() << indent2 << "Registration Height/Expiry Height: " << entry.registration_height << "/" << expiry_height << " (in " << delta_height << " blocks)";
-        tools::msg_writer() << indent2 << "Expiry Date (Estimated UTC): " << get_date_time(expiry_epoch_time) << " (" << get_human_time_ago(expiry_epoch_time, now) << ")";
-      }
-      else
-      {
-        tools::msg_writer() << indent2 << "Registration Height/Expiry Height: " << entry.registration_height << " / " << expiry_height << " (in ?? blocks) ";
-        tools::msg_writer() << indent2 << "Expiry Date (Estimated UTC): ?? (Could not get current blockchain height)";
-      }
     }
-
-    // Print reward status
-    if (is_registered)
+    else
     {
-      tools::msg_writer() << indent2 << "Last Reward At (Block Height/TX Index): "  << entry.last_reward_block_height << " / " << entry.last_reward_transaction_index;
+        expiry_height = entry.registration_height + service_nodes::staking_num_lock_blocks(nettype);
     }
 
-    tools::msg_writer() << indent2 << "Operator Cut (\% Of Reward): "             << ((entry.portions_for_operator / (double)STAKING_PORTIONS) * 100.0) << "%";
-    tools::msg_writer() << indent2 << "Operator Address: "                        << entry.operator_address;
-
-    // Print service node tests
-    if (is_registered)
+    buffer.append(indent2);
+    buffer.append("Register/Expiry Height: ");
+    if (expiry_height == service_nodes::KEY_IMAGE_AWAITING_UNLOCK_HEIGHT)
     {
-      epee::console_colors uptime_proof_color = (entry.last_uptime_proof == 0) ? epee::console_color_red : epee::console_color_green;
-      if (entry.last_uptime_proof == 0)
-        tools::msg_writer(uptime_proof_color) << indent2 << "Last Uptime Proof Received: Not Received Yet";
-      else
-        tools::msg_writer(uptime_proof_color) << indent2 << "Last Uptime Proof Received: "            << get_human_time_ago(entry.last_uptime_proof, time(nullptr));
+        buffer.append("Staking Infinitely (stake unlock not requested yet)\n");
     }
-
-    // Print contributors
+    else
     {
-      tools::msg_writer() << "";
-      for (size_t j = 0; j < entry.contributors.size(); ++j)
-      {
-        const cryptonote::COMMAND_RPC_GET_SERVICE_NODES::response::contribution &contributor = entry.contributors[j];
-        tools::msg_writer() << indent2 << "[" << j << "] Contributor: " << contributor.address;
-        tools::msg_writer() << indent3 << "Amount / Reserved: "         << cryptonote::print_money(contributor.amount) << " / " << cryptonote::print_money(contributor.reserved);
-      }
-    }
+      uint64_t delta_height      = expiry_height - curr_height;
+      uint64_t expiry_epoch_time = now + (delta_height * DIFFICULTY_TARGET_V2);
 
-    tools::msg_writer() << "";
+      buffer.append(std::to_string(entry.registration_height));
+      buffer.append("/");
+      buffer.append(std::to_string(expiry_height));
+      buffer.append(" (in ");
+      buffer.append(std::to_string(delta_height));
+      buffer.append(") blocks\n");
+
+      buffer.append(indent2);
+      buffer.append("Expiry Date (Est. UTC): ");
+      buffer.append(get_date_time(expiry_epoch_time));
+      buffer.append(" (");
+      buffer.append(get_human_time_ago(expiry_epoch_time, now));
+      buffer.append(")\n");
+    }
+  }
+
+  if (is_registered) // Print reward status
+  {
+    buffer.append(indent2);
+    buffer.append("Last Reward At (Height/TX Index): ");
+    buffer.append(std::to_string(entry.last_reward_block_height));
+    buffer.append("/");
+    buffer.append(std::to_string(entry.last_reward_transaction_index));
+    buffer.append("\n");
+  }
+
+  // Print operator information
+  {
+    buffer.append(indent2);
+    buffer.append("Operator Cut (\% Of Reward): ");
+    buffer.append(std::to_string((entry.portions_for_operator / (double)STAKING_PORTIONS) * 100.0));
+    buffer.append("%\n");
+
+    buffer.append(indent2);
+    buffer.append("Operator Address: ");
+    buffer.append(entry.operator_address);
+    buffer.append("\n");
+  }
+
+  if (is_registered) // Print service node tests
+  {
+    epee::console_colors uptime_proof_color = (entry.last_uptime_proof == 0) ? epee::console_color_red : epee::console_color_green;
+
+    buffer.append(indent2);
+    if (entry.last_uptime_proof == 0)
+    {
+      buffer.append("Last Uptime Proof Received: Not Received Yet");
+    }
+    else
+    {
+      buffer.append("Last Uptime Proof Received: ");
+      buffer.append(get_human_time_ago(entry.last_uptime_proof, time(nullptr)));
+    }
+    buffer.append("\n");
+  }
+
+  // Print contributors
+  {
+    buffer.append("\n");
+    for (size_t j = 0; j < entry.contributors.size(); ++j)
+    {
+      const cryptonote::COMMAND_RPC_GET_SERVICE_NODES::response::contributor &contributor = entry.contributors[j];
+
+      buffer.append(indent2);
+      buffer.append("[");
+      buffer.append(std::to_string(j));
+      buffer.append("] Contributor: ");
+      buffer.append(contributor.address);
+      buffer.append("\n");
+
+      buffer.append(indent3);
+      buffer.append("Amount / Reserved: ");
+      buffer.append(cryptonote::print_money(contributor.amount));
+      buffer.append("/");
+      buffer.append(cryptonote::print_money(contributor.reserved));
+      buffer.append("\n");
+    }
   }
 }
 
@@ -2146,32 +2280,29 @@ bool t_rpc_command_executor::print_sn(const std::vector<std::string> &args)
     cryptonote::COMMAND_RPC_GET_SERVICE_NODES::response res = {};
     std::string fail_message = "Unsuccessful";
     epee::json_rpc::error error_resp;
-    req.service_node_pubkeys = args;
+    
+    for (unsigned int i=0; i<args.size(); ++i) 
+    {
+      if (!(args[i] == "+json")) 
+      {
+        req.service_node_pubkeys.push_back(args[i]);
+      }
+      else {
+        req.include_json = true;
+      }
+    }
 
     cryptonote::COMMAND_RPC_GET_INFO::request get_info_req;
     cryptonote::COMMAND_RPC_GET_INFO::response get_info_res;
 
     cryptonote::network_type nettype = cryptonote::UNDEFINED;
-    uint64_t *curr_height = nullptr;
-    int hard_fork_version = 7;
+    uint64_t curr_height  = 0;
     if (m_is_rpc)
     {
       if (!m_rpc_client->rpc_request(get_info_req, get_info_res, "/getinfo", fail_message.c_str()))
       {
         tools::fail_msg_writer() << make_error(fail_message, get_info_res.status);
         return true;
-      }
-
-      {
-        cryptonote::COMMAND_RPC_HARD_FORK_INFO::request  hard_fork_info_req = {};
-        cryptonote::COMMAND_RPC_HARD_FORK_INFO::response hard_fork_info_res = {};
-        if (!m_rpc_client->json_rpc_request(hard_fork_info_req, hard_fork_info_res, "hard_fork_info", fail_message.c_str()))
-        {
-          tools::fail_msg_writer() << make_error(fail_message, hard_fork_info_res.status);
-          return true;
-        }
-
-        hard_fork_version = hard_fork_info_res.version;
       }
 
       if (!m_rpc_client->json_rpc_request(req, res, "get_service_nodes", fail_message.c_str()))
@@ -2183,23 +2314,12 @@ bool t_rpc_command_executor::print_sn(const std::vector<std::string> &args)
       if (get_info_res.mainnet) nettype       = cryptonote::MAINNET;
       else if (get_info_res.stagenet) nettype = cryptonote::STAGENET;
       else if (get_info_res.testnet) nettype  = cryptonote::TESTNET;
-      curr_height = &get_info_res.height;
+      curr_height = get_info_res.height;
     }
     else
     {
       if (m_rpc_server->on_get_info(get_info_req, get_info_res) || get_info_res.status == CORE_RPC_STATUS_OK)
-        curr_height = &get_info_res.height;
-
-      {
-        cryptonote::COMMAND_RPC_HARD_FORK_INFO::request  hard_fork_info_req = {};
-        cryptonote::COMMAND_RPC_HARD_FORK_INFO::response hard_fork_info_res = {};
-        if (!m_rpc_server->on_hard_fork_info(hard_fork_info_req, hard_fork_info_res, error_resp) || hard_fork_info_res.status != CORE_RPC_STATUS_OK)
-        {
-          tools::fail_msg_writer() << make_error(fail_message, error_resp.message);
-          return true;
-        }
-        hard_fork_version = hard_fork_info_res.version;
-      }
+        curr_height = get_info_res.height;
 
       if (!m_rpc_server->on_get_service_nodes(req, res, error_resp) || res.status != CORE_RPC_STATUS_OK)
       {
@@ -2245,38 +2365,106 @@ bool t_rpc_command_executor::print_sn(const std::vector<std::string> &args)
         return a->last_reward_block_height < b->last_reward_block_height;
     });
 
-    if (unregistered.size() > 0)
+    if (req.include_json)
     {
-      tools::msg_writer() << "Service Node Unregistered State[" << unregistered.size()<< "]";
-      print_service_node_list_state(nettype, hard_fork_version, curr_height, unregistered);
-    }
-
-    if (registered.size() > 0)
-    {
-      tools::msg_writer() << "Service Node Registration State[" << registered.size()<< "]";
-      print_service_node_list_state(nettype, hard_fork_version, curr_height, registered);
+      std::cout << res.as_json << std::endl;
+      return true;
     }
 
     if (unregistered.size() == 0 && registered.size() == 0)
     {
-      if (args.size() > 0)
+      if (req.service_node_pubkeys.size() > 0)
       {
-        tools::msg_writer() << "No service node is currently known on the network for: ";
-        for (const std::string &arg : args)
+        int str_size = 0;
+        for (const std::string &arg : args) str_size += (arg.size() + 2);
+
+        std::string buffer;
+        buffer.reserve(str_size);
+        for (size_t i = 0; i < args.size(); ++i)
         {
-          tools::msg_writer() << arg;
+          buffer.append(args[i]);
+          if (i < args[i].size() - 1) buffer.append(", ");
         }
+
+        tools::msg_writer() << "No service node is currently known on the network: " << buffer;
       }
       else
       {
         tools::msg_writer() << "No service node is currently known on the network";
       }
+
+      return true;
     }
+
+    using hard_fork_height = uint64_t;
+    std::array<hard_fork_height, cryptonote::network_version_count> hf_heights = {};
+    for (size_t version = cryptonote::network_version_9_service_nodes; version < hf_heights.size(); ++version)
+    {
+      cryptonote::COMMAND_RPC_HARD_FORK_INFO::request  request  = {};
+      cryptonote::COMMAND_RPC_HARD_FORK_INFO::response response = {};
+      request.version                                           = version;
+
+      if (m_is_rpc)
+      {
+        if (!m_rpc_client->json_rpc_request(request, response, "hard_fork_info", fail_message.c_str()))
+        {
+          tools::fail_msg_writer() << make_error(fail_message, response.status);
+          return true;
+        }
+      }
+      else
+      {
+        if (!m_rpc_server->on_hard_fork_info(request, response, error_resp) || response.status != CORE_RPC_STATUS_OK)
+        {
+          tools::fail_msg_writer() << make_error(fail_message, error_resp.message);
+          return true;
+        }
+      }
+
+      hf_heights[request.version] = response.earliest_height;
+    }
+
+    auto const find_closest_hardfork = [](std::array<hard_fork_height, cryptonote::network_version_count> const &hf_heights, uint64_t registration_height) -> size_t {
+      uint64_t result = cryptonote::network_version_count - 1;
+      for (int version = cryptonote::network_version_7; version < cryptonote::network_version_count; version++)
+      {
+        uint64_t hf_height = hf_heights[version];
+        if (registration_height < hf_height) break;
+        result = version;
+      }
+      return result;
+    };
+
+    std::string unregistered_print_data;
+    std::string registered_print_data;
+    for (size_t i = 0; i < unregistered.size(); i++)
+    {
+      cryptonote::COMMAND_RPC_GET_SERVICE_NODES::response::entry const &entry = (*unregistered[i]);
+      size_t hf_version = find_closest_hardfork(hf_heights, entry.registration_height);
+      append_printable_service_node_list_entry(nettype, hf_version, curr_height, i, entry, unregistered_print_data);
+      if (i < unregistered.size())
+        unregistered_print_data.append("\n");
+    }
+
+    for (size_t i = 0; i < registered.size(); i++)
+    {
+      cryptonote::COMMAND_RPC_GET_SERVICE_NODES::response::entry const &entry = (*registered[i]);
+      size_t hf_version = find_closest_hardfork(hf_heights, entry.registration_height);
+      append_printable_service_node_list_entry(nettype, hf_version, curr_height, i, entry, registered_print_data);
+      if (i < registered.size())
+        registered_print_data.append("\n");
+    }
+
+    if (unregistered.size() > 0)
+      tools::msg_writer() << "Service Node Unregistered State [" << unregistered.size() << "]\n" << unregistered_print_data;
+
+    if (registered.size() > 0)
+      tools::msg_writer() << "Service Node Registration State [" << registered.size() << "]\n"   << registered_print_data;
 
     return true;
 }
 
-bool t_rpc_command_executor::print_sn_status()
+bool t_rpc_command_executor::print_sn_status(const std::vector<std::string>& args)
 {
   cryptonote::COMMAND_RPC_GET_SERVICE_NODE_KEY::response res = {};
   {
@@ -2302,8 +2490,22 @@ bool t_rpc_command_executor::print_sn_status()
     }
   }
 
-  std::string const &sn_key_str = res.service_node_pubkey;
-  bool result = print_sn({sn_key_str});
+  if (args.size() > 1)
+  {
+    tools::fail_msg_writer() << "Unexpected arguments";
+    return false;
+  }
+
+  bool result = false;
+  if (args.size() == 1) 
+  {
+    result = print_sn({res.service_node_pubkey, args[0]});
+  }
+  else
+  {
+    result = print_sn({res.service_node_pubkey});
+  }
+
   return result;
 }
 
@@ -2337,6 +2539,33 @@ bool t_rpc_command_executor::print_sr(uint64_t height)
   return true;
 }
 
+bool t_rpc_command_executor::pop_blocks(uint64_t num_blocks)
+{
+  cryptonote::COMMAND_RPC_POP_BLOCKS::request req;
+  cryptonote::COMMAND_RPC_POP_BLOCKS::response res;
+  std::string fail_message = "pop_blocks failed";
+
+  req.nblocks = num_blocks;
+  if (m_is_rpc)
+  {
+    if (!m_rpc_client->rpc_request(req, res, "/pop_blocks", fail_message.c_str()))
+    {
+      return true;
+    }
+  }
+  else
+  {
+    if (!m_rpc_server->on_pop_blocks(req, res) || res.status != CORE_RPC_STATUS_OK)
+    {
+       tools::fail_msg_writer() << make_error(fail_message, res.status);
+       return true;
+    }
+  }
+
+  tools::success_msg_writer() << "new height: " << res.height;
+  return true;
+}
+
 bool t_rpc_command_executor::print_sn_key()
 {
   cryptonote::COMMAND_RPC_GET_SERVICE_NODE_KEY::request req = {};
@@ -2361,7 +2590,8 @@ bool t_rpc_command_executor::print_sn_key()
     }
   }
 
-  tools::success_msg_writer() << "Service Node Public Key: " << res.service_node_pubkey;
+  std::string const msg_buf = "Service Node Public Key: " + res.service_node_pubkey;
+  tools::success_msg_writer() << msg_buf;
   return true;
 }
 
@@ -2376,17 +2606,7 @@ static uint64_t get_amount_to_make_portions(uint64_t amount, uint64_t portions)
   div128_64(hi, lo, STAKING_PORTIONS, &resulthi, &resultlo);
   return resultlo;
 }
-// Returns lowest x such that (staking_requirement * x/STAKING_PORTIONS) >= amount
-static uint64_t get_portions_to_make_amount(uint64_t staking_requirement, uint64_t amount)
-{
-  uint64_t lo, hi, resulthi, resultlo;
-  lo = mul128(amount, STAKING_PORTIONS, &hi);
-  if (lo > UINT64_MAX - (staking_requirement - 1))
-    hi++;
-  lo += staking_requirement-1;
-  div128_64(hi, lo, staking_requirement, &resulthi, &resultlo);
-  return resultlo;
-}
+
 static uint64_t get_actual_amount(uint64_t amount, uint64_t portions)
 {
   uint64_t lo, hi, resulthi, resultlo;
@@ -2397,356 +2617,662 @@ static uint64_t get_actual_amount(uint64_t amount, uint64_t portions)
 
 bool t_rpc_command_executor::prepare_registration()
 {
-  std::string categories = mlog_get_categories();
-  mlog_set_categories("");
+  // RAII-style class to temporarily clear categories and restore upon destruction (i.e. upon returning).
+  struct clear_log_categories {
+    std::string categories;
+    clear_log_categories() { categories = mlog_get_categories(); mlog_set_categories(""); }
+    ~clear_log_categories() { mlog_set_categories(categories.c_str()); }
+  };
+  auto scoped_log_cats = std::unique_ptr<clear_log_categories>(new clear_log_categories());
 
-  cryptonote::COMMAND_RPC_GET_INFO::request req;
-  cryptonote::COMMAND_RPC_GET_INFO::response res;
-
-  if (m_is_rpc)
+  // Check if the daemon was started in Service Node or not
   {
-    std::cout << "Cannot prepare registration over RPC" << std::endl;
-    mlog_set_categories(categories.c_str());
-    return true;
-  }
+    cryptonote::COMMAND_RPC_GET_SERVICE_NODE_KEY::request keyreq = {};
+    cryptonote::COMMAND_RPC_GET_SERVICE_NODE_KEY::response keyres = {};
+    std::string const fail_msg = "Cannot get service node key. Make sure you are running daemon with --service-node flag";
 
-  cryptonote::COMMAND_RPC_GET_SERVICE_NODE_KEY::request keyreq = {};
-  cryptonote::COMMAND_RPC_GET_SERVICE_NODE_KEY::response keyres = {};
-  epee::json_rpc::error error_resp;
-  if (!m_rpc_server->on_get_service_node_key(keyreq, keyres, error_resp) || keyres.status != CORE_RPC_STATUS_OK)
-  {
-    tools::fail_msg_writer() << "Cannot get service node key. Make sure you are running daemon with --service-node flag";
-    mlog_set_categories(categories.c_str());
-    return true;
-  }
-
-  if (!m_rpc_server->on_get_info(req, res) || res.status != CORE_RPC_STATUS_OK)
-  {
-    std::cout << "Could not get current blockchain info" << std::endl;
-    mlog_set_categories(categories.c_str());
-    return true;
-  }
-
-#ifdef HAVE_READLINE
-  rdln::suspend_readline pause_readline;
-#endif
-
-  size_t number_participants = 1;
-  uint64_t operating_cost_portions = STAKING_PORTIONS;
-  bool is_solo_stake = false;
-  const auto nettype = m_rpc_server->nettype();
-
-  std::vector<std::string> addresses;
-  std::vector<uint64_t> contributions;
-
-  const uint64_t block_height = std::max(res.height, res.target_height);
-  const uint64_t staking_requirement =
-    std::max(service_nodes::get_staking_requirement(nettype, block_height),
-             service_nodes::get_staking_requirement(nettype, block_height + 30 * 24)); // allow 1 day
-  uint64_t portions_remaining = STAKING_PORTIONS;
-  uint64_t total_reserved_contributions = 0;
-
-  // anything less than DUST will be added to operator stake
-  const uint64_t DUST = MAX_NUMBER_OF_CONTRIBUTORS;
-
-  std::cout << "Current staking requirement: " << cryptonote::print_money(staking_requirement) << " " << cryptonote::get_unit() << std::endl;
-  
-  std::string solo_stake;
-  std::cout << "Will the operator contribute the entire stake? (Y/Yes/N/No): ";
-  std::cin >> solo_stake;
-  if(command_line::is_yes(solo_stake))
-  {
-    is_solo_stake = true;
-  }
-  else if(command_line::is_no(solo_stake))
-  {
-    is_solo_stake = false;
-  }
-  else
-  {
-    std::cout << "Invalid answer. Aborted." << std::endl;
-    mlog_set_categories(categories.c_str());
-    return true;
-  }
-
-  if(is_solo_stake)
-  {
-    contributions.push_back(STAKING_PORTIONS);
-    portions_remaining = 0;
-    total_reserved_contributions += get_actual_amount(staking_requirement, STAKING_PORTIONS);
-  }
-  else
-  {
-    std::string operating_cost_string;
-    std::cout << "What percentage of the total staking reward would the operator like to reserve as an operator fee [0-100]%: ";
-    std::cin >> operating_cost_string;
-    
-    // remove any trailing '%'
-    if(!operating_cost_string.empty() && operating_cost_string.back() == '%')
+    if (m_is_rpc)
     {
-      operating_cost_string.pop_back();
-    }
-
-    double operating_cost_percent;
-    try
-    {
-      operating_cost_percent = boost::lexical_cast<double>(operating_cost_string);
-    }
-    catch(...)
-    {
-      std::cout << "Invalid value." << std::endl;
-      mlog_set_categories(categories.c_str());
-      return true;
-    }
-    
-    if(operating_cost_percent < 0.0 || operating_cost_percent > 100.0)
-    {
-      std::cout << "Invalid value. Should be between [0-100]" << std::endl;
-      mlog_set_categories(categories.c_str());
-      return true;
-    }
-
-        // Fix for truncation issue when operator cut = 100 for a pool Service Node.
-    if (operating_cost_percent == 100.0)
-    {
-      operating_cost_portions = STAKING_PORTIONS;
+      if (!m_rpc_client->json_rpc_request(keyreq, keyres, "get_service_node_key", fail_msg))
+        return true;
     }
     else
     {
-      operating_cost_portions = (operating_cost_percent / 100.0) * STAKING_PORTIONS;
-    }
-
-    const uint64_t min_contribution_portions = std::min(portions_remaining, MIN_PORTIONS);
-
-    const uint64_t min_contribution = get_amount_to_make_portions(staking_requirement, min_contribution_portions);
-
-    std::cout << "Minimum amount that can be reserved: " << cryptonote::print_money(min_contribution) << " " << cryptonote::get_unit() << std::endl;
-
-    std::cout << "How much kredits does the operator want to reserve in the stake? ";
-    std::string contribution_string;
-    std::cin >> contribution_string;
-    uint64_t operator_cut;
-    if(!cryptonote::parse_amount(operator_cut, contribution_string))
-    {
-      std::cout << "Invalid amount. Aborted." << std::endl;
-      mlog_set_categories(categories.c_str());
-      return true;
-    }
-    uint64_t portions = get_portions_to_make_amount(staking_requirement, operator_cut);
-    if(portions < min_contribution_portions)
-    {
-      std::cout << "The operator needs to contribute at least 25% of the stake requirement (" << cryptonote::print_money(min_contribution) << " " << cryptonote::get_unit() << "). Aborted." << std::endl;
-      mlog_set_categories(categories.c_str());
-      return true;
-    }
-    else if(portions > portions_remaining)
-    {
-      std::cout << "The operator contribution is higher than the staking requirement. Any excess contribution will be locked for the staking duration, but won't yield any additional reward." << std::endl;
-      portions = portions_remaining;
-    }
-    contributions.push_back(portions);
-    portions_remaining -= portions;
-    total_reserved_contributions += get_actual_amount(staking_requirement, portions);
-  }
-
-  if (!is_solo_stake)
-  {
-    std::string allow_multiple_contributors;
-    std::cout << "Do you want to reserve portions of the stake for other specific contributors? (Y/Yes/N/No): ";
-    std::cin >> allow_multiple_contributors;
-    if(command_line::is_yes(allow_multiple_contributors))
-    {
-      std::cout << "Number of additional contributors [1-" << (MAX_NUMBER_OF_CONTRIBUTORS - 1) << "]: ";
-      int additional_contributors;
-      if(!(std::cin >> additional_contributors) || additional_contributors < 1 || additional_contributors > (MAX_NUMBER_OF_CONTRIBUTORS - 1))
+      epee::json_rpc::error error_resp;
+      if (!m_rpc_server->on_get_service_node_key(keyreq, keyres, error_resp) || keyres.status != CORE_RPC_STATUS_OK)
       {
-        std::cout << "Invalid value. Should be between [1-" << (MAX_NUMBER_OF_CONTRIBUTORS - 1) << "]" << std::endl;
-        mlog_set_categories(categories.c_str());
-        return true;
-      }
-      number_participants += static_cast<size_t>(additional_contributors);
-    }
-  }
-
-  for (size_t contributor_index = 0; contributor_index < number_participants; ++contributor_index)
-  {
-    const bool is_operator = (contributor_index == 0);
-    const std::string contributor_name = is_operator ? "the operator" : "contributor " + std::to_string(contributor_index);
-
-    if (!is_operator)
-    {
-      const uint64_t min_contribution_portions = std::min(portions_remaining, MIN_PORTIONS);
-      const uint64_t min_contribution = get_amount_to_make_portions(staking_requirement, min_contribution_portions);
-      const uint64_t amount_left = get_amount_to_make_portions(staking_requirement, portions_remaining);
-      std::cout << "The minimum amount possible to contribute is " << cryptonote::print_money(min_contribution) << " " << cryptonote::get_unit() << std::endl;
-      std::cout << "There is " << cryptonote::print_money(amount_left) << " " << cryptonote::get_unit() << " left to meet the staking requirement." << std::endl;
-      std::cout << "How much kredits does " << contributor_name << " want to reserve in the stake? ";
-      uint64_t contribution_amount;
-      std::string contribution_string;
-      std::cin >> contribution_string;
-      if (!cryptonote::parse_amount(contribution_amount, contribution_string))
-      {
-        std::cout << "Invalid amount. Aborted." << std::endl;
-        mlog_set_categories(categories.c_str());
-        return true;
-      }
-      uint64_t portions = get_portions_to_make_amount(staking_requirement, contribution_amount);
-      if (portions < min_contribution_portions)
-      {
-        std::cout << "Invalid amount. Aborted." << std::endl;
-        mlog_set_categories(categories.c_str());
-        return true;
-      }
-      if (portions > portions_remaining)
-        portions = portions_remaining;
-      contributions.push_back(portions);
-      portions_remaining -= portions;
-      total_reserved_contributions += get_actual_amount(staking_requirement, portions);
-    }
-
-    std::cout << "Enter the kredits address for " << contributor_name << ": ";
-    std::string address_string;
-    // the addresses will be validated later down the line
-    if(!(std::cin >> address_string))
-    {
-      std::cout << "Invalid address. Aborted." << std::endl;
-      mlog_set_categories(categories.c_str());
-      return true;
-    }
-    addresses.push_back(address_string);
-  }
-
-  assert(addresses.size() == contributions.size());
-
-  const uint64_t amount_left = staking_requirement - total_reserved_contributions;
-
-  if (!is_solo_stake)
-  {
-    std::cout << "Total staking contributions reserved: " << cryptonote::print_money(total_reserved_contributions) << " " << cryptonote::get_unit() << std::endl;
-    if (amount_left > DUST)
-    {
-      std::cout << "Your total reservations do not equal the staking requirement." << std::endl;
-      std::cout << "You will leave the remaining portion of " << cryptonote::print_money(amount_left) << " " << cryptonote::get_unit() << " open to contributions from anyone, and the Service Node will not activate until the full staking requirement is filled." << std::endl;
-      std::cout << "Is this ok? (Y/Yes/N/No): ";
-      std::string accept_pool_staking;
-      std::cin >> accept_pool_staking;
-      if(command_line::is_yes(accept_pool_staking))
-      {
-        // All good
-      }
-      else if(command_line::is_no(accept_pool_staking))
-      {
-        std::cout << "Staking requirements not met. Aborted." << std::endl;
-        mlog_set_categories(categories.c_str());
-        return true;
-      }
-      else
-      {
-        std::cout << "Invalid answer. Aborted." << std::endl;
-        mlog_set_categories(categories.c_str());
+        tools::fail_msg_writer() << make_error(fail_msg, error_resp.message);
         return true;
       }
     }
   }
 
-  bool autostaking = false;
-  std::cout << "Do you wish to enable automatic re-staking [Y/N]: ";
-  std::string autostake_str;
-  std::cin >> autostake_str;
-  if (command_line::is_yes(autostake_str))
+  // Query the latest known block height and nettype
+  uint64_t block_height            = 0;
+  int hf_version                   = cryptonote::network_version_9_service_nodes;
+  cryptonote::network_type nettype = cryptonote::UNDEFINED;
   {
-    autostaking = true;
-  }
-  else if (command_line::is_no(autostake_str))
-  {
-    autostaking = false;
-  }
-  else
-  {
-    std::cout << "Invalid answer. Aborted." << std::endl;
-    mlog_set_categories(categories.c_str());
-    return true;
+    cryptonote::COMMAND_RPC_GET_INFO::request req;
+    cryptonote::COMMAND_RPC_GET_INFO::response res;
+    cryptonote::COMMAND_RPC_HARD_FORK_INFO::request hf_req;
+    cryptonote::COMMAND_RPC_HARD_FORK_INFO::response hf_res;
+    std::string const info_fail_message = "Could not get current blockchain info";
+
+    if (m_is_rpc)
+    {
+      if (!m_rpc_client->rpc_request(req, res, "/getinfo", info_fail_message.c_str()))
+        return true;
+
+      if (!m_rpc_client->json_rpc_request(hf_req, hf_res, "hard_fork_info", info_fail_message.c_str()))
+        return true;
+
+      if      (res.mainnet) nettype  = cryptonote::MAINNET;
+      else if (res.stagenet) nettype = cryptonote::STAGENET;
+      else if (res.testnet) nettype  = cryptonote::TESTNET;
+    }
+    else
+    {
+      if (!m_rpc_server->on_get_info(req, res) || res.status != CORE_RPC_STATUS_OK)
+      {
+        tools::fail_msg_writer() << make_error(info_fail_message, res.status);
+        return true;
+      }
+
+      epee::json_rpc::error error_resp;
+      if (!m_rpc_server->on_hard_fork_info(hf_req, hf_res, error_resp) || hf_res.status != CORE_RPC_STATUS_OK)
+      {
+        tools::fail_msg_writer() << make_error(info_fail_message, hf_res.status);
+        return true;
+      }
+
+      nettype = m_rpc_server->nettype();
+    }
+
+    hf_version   = hf_res.version;
+    block_height = std::max(res.height, res.target_height);
   }
 
-  std::cout << "Summary:" << std::endl;
-  std::cout << "Operating costs as % of reward: " << (operating_cost_portions * 100.0 / STAKING_PORTIONS) << "%" << std::endl;
-  printf("%-16s%-9s%-19s%-s\n", "Contributor", "Address", "Contribution", "Contribution(%)");
-  printf("%-16s%-9s%-19s%-s\n", "___________", "_______", "____________", "_______________");
+  // Query the latest block we've synced and check that the timestamp is sensible, issue a warning if not
+  {
+    cryptonote::COMMAND_RPC_GET_LAST_BLOCK_HEADER::request req  = {};
+    cryptonote::COMMAND_RPC_GET_LAST_BLOCK_HEADER::response res = {};
+    std::string const fail_msg = "Get latest block failed, unable to check sync status";
 
-  for (size_t i = 0; i < number_participants; ++i)
-  {
-    const std::string participant_name = (i==0) ? "Operator" : "Contributor " + std::to_string(i);
-    uint64_t amount = get_actual_amount(staking_requirement, contributions[i]);
-    if (amount_left <= DUST && i == 0)
-      amount += amount_left; // add dust to the operator.
-    printf("%-16s%-9s%-19s%-.9f\n", participant_name.c_str(), addresses[i].substr(0,6).c_str(), cryptonote::print_money(amount).c_str(), (double)contributions[i] * 100 / STAKING_PORTIONS);
-  }
+    if (m_is_rpc)
+    {
+      if (!m_rpc_client->json_rpc_request(req, res, "get_last_block_header", fail_msg))
+        return true;
+    }
+    else
+    {
+      epee::json_rpc::error error_resp;
+      if (!m_rpc_server->on_get_last_block_header(req, res, error_resp) || res.status != CORE_RPC_STATUS_OK)
+      {
+        tools::fail_msg_writer() << make_error(fail_msg, res.status);
+        return true;
+      }
+    }
 
-  if (amount_left > DUST)
-  {
-    printf("%-16s%-9s%-19s%-.2f\n", "(open)", "", cryptonote::print_money(amount_left).c_str(), amount_left * 100.0 / staking_requirement);
-  }
-  else if (amount_left > 0)
-  {
-    std::cout << "\nActual amounts may differ slightly from specification. This is due to\n" << std::endl;
-    std::cout << "limitations on the way fractions are represented internally.\n" << std::endl;
-  }
+    cryptonote::block_header_response const &header = res.block_header;
+    uint64_t const now                              = time(nullptr);
 
-  std::cout << "\nBecause the actual requirement will depend on the time that you register, the\n";
-  std::cout << "amounts shown here are used as a guide only, and the percentages will remain\n";
-  std::cout << "the same." << std::endl;
+    if (now >= header.timestamp)
+    {
+      uint64_t delta = now - header.timestamp;
+      if (delta > (60 * 60))
+      {
+        tools::fail_msg_writer() << "The last block this Service Node knows about was at least " << get_human_time_ago(header.timestamp, now)
+                                 << "\nYour node is possibly desynced from the network or still syncing to the network."
+                                 << "\n\nRegistering this node may result in a deregistration due to being out of date with the network\n";
+      }
+    }
 
-  std::cout << "\nDo you confirm the information above is correct? (Y/Yes/N/No): ";
-  std::string confirm_string;
-  std::cin >> confirm_string;
-  if(command_line::is_yes(confirm_string))
-  {
-    // all good
-  }
-  else if(command_line::is_no(confirm_string))
-  {
-    std::cout << "Aborted by user." << std::endl;
-    mlog_set_categories(categories.c_str());
-    return true;
-  }
-  else
-  {
-    std::cout << "Invalid answer. Aborted." << std::endl;
-    mlog_set_categories(categories.c_str());
-    return true;
+    if (block_height >= header.height)
+    {
+      uint64_t delta = block_height - header.height;
+      if (delta > 15)
+      {
+        tools::fail_msg_writer() << "The last block this Service Node synced is " << delta << " blocks away from the longest chain we know about."
+                                 << "\n\nRegistering this node may result in a deregistration due to being out of date with the network\n";
+      }
+    }
   }
 
-  // [auto] <operator cut> <address> <fraction> [<address> <fraction> [...]]]
+  const uint64_t staking_requirement =
+    std::max(service_nodes::get_staking_requirement(nettype, block_height, hf_version),
+             service_nodes::get_staking_requirement(nettype, block_height + 30 * 24, hf_version)); // allow 1 day
+
+  // anything less than DUST will be added to operator stake
+  const uint64_t DUST = MAX_NUMBER_OF_CONTRIBUTORS;
+  std::cout << "Current staking requirement: " << cryptonote::print_money(staking_requirement) << " " << cryptonote::get_unit() << std::endl;
+
+  enum struct register_step
+  {
+    ask_is_solo_stake = 0,
+    is_solo_stake__operator_address_to_reserve,
+
+    is_open_stake__get_operator_fee,
+    is_open_stake__do_you_want_to_reserve_other_contributors,
+    is_open_stake__how_many_more_contributors,
+    is_open_stake__operator_amount_to_reserve,
+    is_open_stake__operator_address_to_reserve,
+    is_open_stake__contributor_address_to_reserve,
+    is_open_stake__contributor_amount_to_reserve,
+    is_open_stake__summary_info,
+    final_summary,
+    cancelled_by_user,
+  };
+
+  struct prepare_registration_state
+  {
+    register_step            prev_step                    = register_step::ask_is_solo_stake;
+    bool                     is_solo_stake;
+    size_t                   num_participants             = 1;
+    uint64_t                 operator_fee_portions        = STAKING_PORTIONS;
+    uint64_t                 portions_remaining           = STAKING_PORTIONS;
+    uint64_t                 total_reserved_contributions = 0;
+    std::vector<std::string> addresses;
+    std::vector<uint64_t>    contributions;
+  };
+
+  prepare_registration_state state = {};
+  std::stack<prepare_registration_state> state_stack;
+  state_stack.push(state);
+
+  bool finished = false;
+  register_step step = register_step::ask_is_solo_stake;
+  for (input_line_result last_input_result = input_line_result::yes; !finished;)
+  {
+    if (last_input_result == input_line_result::back)
+    {
+      step = state.prev_step;
+      state_stack.pop();
+      state = state_stack.top();
+      std::cout << std::endl;
+    }
+
+    switch(step)
+    {
+      case register_step::ask_is_solo_stake:
+      {
+        last_input_result = input_line_yes_no_cancel("Will the operator contribute the entire stake?");
+        if(last_input_result == input_line_result::cancel)
+        {
+          step = register_step::cancelled_by_user;
+          continue;
+        }
+
+        state.is_solo_stake = (last_input_result == input_line_result::yes);
+        if (state.is_solo_stake)
+        {
+          std::cout << std::endl;
+          step = register_step::is_solo_stake__operator_address_to_reserve;
+        }
+        else
+        {
+          step = register_step::is_open_stake__get_operator_fee;
+        }
+
+        state_stack.push(state);
+        continue;
+      }
+
+      case register_step::is_solo_stake__operator_address_to_reserve:
+      {
+        std::string address_str;
+        last_input_result = input_line_back_cancel_get_input("Enter the kredits address for the solo staker", address_str);
+        if (last_input_result == input_line_result::back)
+          continue;
+
+        if (last_input_result == input_line_result::cancel)
+        {
+          step = register_step::cancelled_by_user;
+          continue;
+        }
+
+        state.addresses.push_back(address_str); // the addresses will be validated later down the line
+        state.contributions.push_back(STAKING_PORTIONS);
+        state.portions_remaining = 0;
+        state.total_reserved_contributions += staking_requirement;
+        state.prev_step = step;
+        step            = register_step::final_summary;
+        state_stack.push(state);
+        continue;
+      }
+
+      case register_step::is_open_stake__get_operator_fee:
+      {
+        std::string operator_fee_str;
+        last_input_result = input_line_back_cancel_get_input("What percentage of the total staking reward would the operator like to reserve as an operator fee [0-100]%", operator_fee_str);
+
+        if (last_input_result == input_line_result::back)
+          continue;
+
+        if (last_input_result == input_line_result::cancel)
+        {
+          step = register_step::cancelled_by_user;
+          continue;
+        }
+
+        if (!service_nodes::get_portions_from_percent_str(operator_fee_str, state.operator_fee_portions))
+        {
+          std::cout << "Invalid value: " << operator_fee_str << ". Should be between [0-100]" << std::endl;
+          continue;
+        }
+
+        step = register_step::is_open_stake__do_you_want_to_reserve_other_contributors;
+        state_stack.push(state);
+        continue;
+      }
+
+      case register_step::is_open_stake__do_you_want_to_reserve_other_contributors:
+      {
+        last_input_result = input_line_yes_no_back_cancel("Do you want to reserve portions of the stake for other specific contributors?");
+        if (last_input_result == input_line_result::back)
+          continue;
+
+        if (last_input_result == input_line_result::cancel)
+        {
+          step = register_step::cancelled_by_user;
+          continue;
+        }
+
+        state.prev_step = step;
+        if(last_input_result == input_line_result::yes)
+        {
+          step = register_step::is_open_stake__how_many_more_contributors;
+        }
+        else
+        {
+          std::cout << std::endl;
+          step = register_step::is_open_stake__operator_address_to_reserve;
+        }
+
+        state_stack.push(state);
+        continue;
+      }
+
+      case register_step::is_open_stake__how_many_more_contributors:
+      {
+        std::string prompt = "Number of additional contributors [1-" + std::to_string(MAX_NUMBER_OF_CONTRIBUTORS - 1) + "]";
+        std::string input;
+        last_input_result = input_line_back_cancel_get_input(prompt.c_str(), input);
+
+        if (last_input_result == input_line_result::back)
+          continue;
+
+        if (last_input_result == input_line_result::cancel)
+        {
+          step = register_step::cancelled_by_user;
+          continue;
+        }
+
+        long additional_contributors = strtol(input.c_str(), NULL, 10 /*base 10*/);
+        if(additional_contributors < 1 || additional_contributors > (MAX_NUMBER_OF_CONTRIBUTORS - 1))
+        {
+          std::cout << "Invalid value. Should be between [1-" << (MAX_NUMBER_OF_CONTRIBUTORS - 1) << "]" << std::endl;
+          continue;
+        }
+
+        std::cout << std::endl;
+        state.num_participants += static_cast<size_t>(additional_contributors);
+        state.prev_step = step;
+        step            = register_step::is_open_stake__operator_address_to_reserve;
+        state_stack.push(state);
+        continue;
+      }
+
+      case register_step::is_open_stake__operator_address_to_reserve:
+      {
+        std::string address_str;
+        last_input_result = input_line_back_cancel_get_input("Enter the kredits address for the operator", address_str);
+        if (last_input_result == input_line_result::back)
+          continue;
+
+        if (last_input_result == input_line_result::cancel)
+        {
+          step = register_step::cancelled_by_user;
+          continue;
+        }
+
+        state.addresses.push_back(address_str); // the addresses will be validated later down the line
+        state.prev_step = step;
+        step            = register_step::is_open_stake__operator_amount_to_reserve;
+        state_stack.push(state);
+        continue;
+      }
+
+      case register_step::is_open_stake__operator_amount_to_reserve:
+      {
+        uint64_t min_contribution_portions = service_nodes::get_min_node_contribution_in_portions(hf_version, staking_requirement, 0, 0);
+        const uint64_t min_contribution    = get_amount_to_make_portions(staking_requirement, min_contribution_portions);
+        std::cout << "Minimum amount that can be reserved: " << cryptonote::print_money(min_contribution) << " " << cryptonote::get_unit() << std::endl;
+
+        std::string contribution_str;
+        last_input_result = input_line_back_cancel_get_input("How much kredits does the operator want to reserve in the stake?", contribution_str);
+        if (last_input_result == input_line_result::back)
+          continue;
+
+        if (last_input_result == input_line_result::cancel)
+        {
+          step = register_step::cancelled_by_user;
+          continue;
+        }
+
+        uint64_t contribution;
+        if(!cryptonote::parse_amount(contribution, contribution_str))
+        {
+          std::cout << "Invalid amount." << std::endl;
+          continue;
+        }
+
+        uint64_t portions = service_nodes::get_portions_to_make_amount(staking_requirement, contribution);
+        if(portions < min_contribution_portions)
+        {
+          std::cout << "The operator needs to contribute at least 25% of the stake requirement (" << cryptonote::print_money(min_contribution) << " " << cryptonote::get_unit() << "). Aborted." << std::endl;
+          continue;
+        }
+
+        if(portions > state.portions_remaining)
+        {
+          std::cout << "The operator contribution is higher than the staking requirement. Any excess contribution will be locked for the staking duration, but won't yield any additional reward." << std::endl;
+          portions = state.portions_remaining;
+        }
+
+        state.contributions.push_back(portions);
+        state.portions_remaining -= portions;
+        state.total_reserved_contributions += get_actual_amount(staking_requirement, portions);
+        state.prev_step = step;
+
+        if (state.num_participants > 1)
+        {
+          step = register_step::is_open_stake__contributor_address_to_reserve;
+        }
+        else
+        {
+          step = register_step::is_open_stake__summary_info;
+        }
+
+        std::cout << std::endl;
+        state_stack.push(state);
+        continue;
+      }
+
+      case register_step::is_open_stake__contributor_address_to_reserve:
+      {
+        std::string const prompt = "Enter the kredits address for contributor " + std::to_string(state.contributions.size() + 1);
+        std::string address_str;
+        last_input_result = input_line_back_cancel_get_input(prompt.c_str(), address_str);
+        if (last_input_result == input_line_result::back)
+          continue;
+
+        if (last_input_result == input_line_result::cancel)
+        {
+          step = register_step::cancelled_by_user;
+          continue;
+        }
+
+        // the addresses will be validated later down the line
+        state.addresses.push_back(address_str);
+        state.prev_step = step;
+        step            = register_step::is_open_stake__contributor_amount_to_reserve;
+        state_stack.push(state);
+        continue;
+      }
+
+      case register_step::is_open_stake__contributor_amount_to_reserve:
+      {
+        const uint64_t amount_left         = staking_requirement - state.total_reserved_contributions;
+        uint64_t min_contribution_portions = service_nodes::get_min_node_contribution_in_portions(hf_version, staking_requirement, state.total_reserved_contributions, state.contributions.size());
+        const uint64_t min_contribution    = service_nodes::portions_to_amount(staking_requirement, min_contribution_portions);
+
+        std::cout << "The minimum amount possible to contribute is " << cryptonote::print_money(min_contribution) << " " << cryptonote::get_unit() << std::endl;
+        std::cout << "There is " << cryptonote::print_money(amount_left) << " " << cryptonote::get_unit() << " left to meet the staking requirement." << std::endl;
+
+        std::string contribution_str;
+        std::string const prompt = "How much kredits does contributor " + std::to_string(state.contributions.size() + 1) + " want to reserve in the stake?";
+        last_input_result        = input_line_back_cancel_get_input(prompt.c_str(), contribution_str);
+        if (last_input_result == input_line_result::back)
+          continue;
+
+        if (last_input_result == input_line_result::cancel)
+        {
+          step = register_step::cancelled_by_user;
+          continue;
+        }
+
+        uint64_t contribution;
+        if (!cryptonote::parse_amount(contribution, contribution_str))
+        {
+          std::cout << "Invalid amount." << std::endl;
+          continue;
+        }
+
+        uint64_t portions = service_nodes::get_portions_to_make_amount(staking_requirement, contribution);
+        if (portions < min_contribution_portions)
+        {
+          std::cout << "The amount is too small." << std::endl;
+          continue;
+        }
+
+        if (portions > state.portions_remaining)
+          portions = state.portions_remaining;
+
+        state.contributions.push_back(portions);
+        state.portions_remaining -= portions;
+        state.total_reserved_contributions += get_actual_amount(staking_requirement, portions);
+        state.prev_step = step;
+
+        if (state.contributions.size() == state.num_participants)
+          step = register_step::is_open_stake__summary_info;
+        else
+          step = register_step::is_open_stake__contributor_address_to_reserve;
+
+        std::cout << std::endl;
+        state_stack.push(state);
+        continue;
+      }
+
+      case register_step::is_open_stake__summary_info:
+      {
+        const uint64_t amount_left = staking_requirement - state.total_reserved_contributions;
+        std::cout << "Total staking contributions reserved: " << cryptonote::print_money(state.total_reserved_contributions) << " " << cryptonote::get_unit() << std::endl;
+        if (amount_left > DUST)
+        {
+          std::cout << "Your total reservations do not equal the staking requirement." << std::endl;
+          std::cout << "You will leave the remaining portion of " << cryptonote::print_money(amount_left) << " " << cryptonote::get_unit() << " open to contributions from anyone, and the Service Node will not activate until the full staking requirement is filled." << std::endl;
+
+          last_input_result = input_line_yes_no_back_cancel("Is this ok?\n");
+          if(last_input_result == input_line_result::no || last_input_result == input_line_result::cancel)
+          {
+            step = register_step::cancelled_by_user;
+            continue;
+          }
+
+          if(last_input_result == input_line_result::back)
+            continue;
+
+          state_stack.push(state);
+          state.prev_step = step;
+        }
+
+        step = register_step::final_summary;
+        continue;
+      }
+
+      case register_step::final_summary:
+      {
+        assert(state.addresses.size() == state.contributions.size());
+        const uint64_t amount_left = staking_requirement - state.total_reserved_contributions;
+
+        std::cout << "Summary:" << std::endl;
+        std::cout << "Operating costs as % of reward: " << (state.operator_fee_portions * 100.0 / STAKING_PORTIONS) << "%" << std::endl;
+        printf("%-16s%-9s%-19s%-s\n", "Contributor", "Address", "Contribution", "Contribution(%)");
+        printf("%-16s%-9s%-19s%-s\n", "___________", "_______", "____________", "_______________");
+
+        for (size_t i = 0; i < state.num_participants; ++i)
+        {
+          const std::string participant_name = (i==0) ? "Operator" : "Contributor " + std::to_string(i);
+          uint64_t amount = get_actual_amount(staking_requirement, state.contributions[i]);
+          if (amount_left <= DUST && i == 0)
+            amount += amount_left; // add dust to the operator.
+          printf("%-16s%-9s%-19s%-.9f\n", participant_name.c_str(), state.addresses[i].substr(0,6).c_str(), cryptonote::print_money(amount).c_str(), (double)state.contributions[i] * 100 / STAKING_PORTIONS);
+        }
+
+        if (amount_left > DUST)
+        {
+          printf("%-16s%-9s%-19s%-.2f\n", "(open)", "", cryptonote::print_money(amount_left).c_str(), amount_left * 100.0 / staking_requirement);
+        }
+        else if (amount_left > 0)
+        {
+          std::cout << "\nActual amounts may differ slightly from specification. This is due to\n" << std::endl;
+          std::cout << "limitations on the way fractions are represented internally.\n" << std::endl;
+        }
+
+        std::cout << "\nBecause the actual requirement will depend on the time that you register, the\n";
+        std::cout << "amounts shown here are used as a guide only, and the percentages will remain\n";
+        std::cout << "the same." << std::endl << std::endl;
+
+        last_input_result = input_line_yes_no_back_cancel("Do you confirm the information above is correct?");
+        if(last_input_result == input_line_result::no || last_input_result == input_line_result::cancel)
+        {
+          step = register_step::cancelled_by_user;
+          continue;
+        }
+
+        if(last_input_result == input_line_result::back)
+          continue;
+
+        finished = true;
+        continue;
+      }
+
+      case register_step::cancelled_by_user:
+      {
+        std::cout << "Cancel requested in prepare registration. Aborting." << std::endl;
+        return true;
+      }
+    }
+  }
+
+  // <operator cut> <address> <fraction> [<address> <fraction> [...]]]
   std::vector<std::string> args;
-
-  if (autostaking)
-    args.push_back("auto");
-
-  args.push_back(std::to_string(operating_cost_portions));
-
-  for (size_t i = 0; i < number_participants; ++i)
+  args.push_back(std::to_string(state.operator_fee_portions));
+  for (size_t i = 0; i < state.num_participants; ++i)
   {
-    args.push_back(addresses[i]);
-    args.push_back(std::to_string(contributions[i]));
+    args.push_back(state.addresses[i]);
+    args.push_back(std::to_string(state.contributions[i]));
   }
 
-  for (size_t i = 0; i < addresses.size(); i++)
+  for (size_t i = 0; i < state.addresses.size(); i++)
   {
     for (size_t j = 0; j < i; j++)
     {
-      if (addresses[i] == addresses[j])
+      if (state.addresses[i] == state.addresses[j])
       {
         std::cout << "Must not provide the same address twice" << std::endl;
-        mlog_set_categories(categories.c_str());
         return true;
       }
     }
   }
 
-  mlog_set_categories(categories.c_str());
+  scoped_log_cats.reset();
 
-  bool result = get_service_node_registration_cmd(args);
+  {
+    cryptonote::COMMAND_RPC_GET_SERVICE_NODE_REGISTRATION_CMD_RAW::request req;
+    cryptonote::COMMAND_RPC_GET_SERVICE_NODE_REGISTRATION_CMD_RAW::response res;
+    std::string fail_message = "Unsuccessful";
+
+    req.args = args;
+    req.make_friendly = true;
+    req.staking_requirement = staking_requirement;
+    if (m_is_rpc)
+    {
+      if (!m_rpc_client->json_rpc_request(req, res, "get_service_node_registration_cmd_raw", fail_message))
+      {
+        tools::fail_msg_writer() << "Failed to validate registration arguments; check the addresses and registration parameters and that the Daemon is running with the '--service-node' flag";
+        return true;
+      }
+    }
+    else
+    {
+      epee::json_rpc::error error_resp;
+      if (!m_rpc_server->on_get_service_node_registration_cmd_raw(req, res, error_resp) || res.status != CORE_RPC_STATUS_OK)
+      {
+        tools::fail_msg_writer() << make_error(fail_message, error_resp.message);
+        return true;
+      }
+    }
+
+    tools::success_msg_writer() << res.registration_cmd;
+  }
 
   return true;
 }
+
+bool t_rpc_command_executor::prune_blockchain()
+{
+    cryptonote::COMMAND_RPC_PRUNE_BLOCKCHAIN::request req;
+    cryptonote::COMMAND_RPC_PRUNE_BLOCKCHAIN::response res;
+    std::string fail_message = "Unsuccessful";
+    epee::json_rpc::error error_resp;
+
+    req.check = false;
+
+    if (m_is_rpc)
+    {
+        if (!m_rpc_client->json_rpc_request(req, res, "prune_blockchain", fail_message.c_str()))
+        {
+            return true;
+        }
+    }
+    else
+    {
+        if (!m_rpc_server->on_prune_blockchain(req, res, error_resp) || res.status != CORE_RPC_STATUS_OK)
+        {
+            tools::fail_msg_writer() << make_error(fail_message, res.status);
+            return true;
+        }
+    }
+
+    tools::success_msg_writer() << "Blockchain pruned: seed " << epee::string_tools::to_string_hex(res.pruning_seed);
+    return true;
+}
+
+bool t_rpc_command_executor::check_blockchain_pruning()
+{
+    cryptonote::COMMAND_RPC_PRUNE_BLOCKCHAIN::request req;
+    cryptonote::COMMAND_RPC_PRUNE_BLOCKCHAIN::response res;
+    std::string fail_message = "Unsuccessful";
+    epee::json_rpc::error error_resp;
+
+    req.check = true;
+
+    if (m_is_rpc)
+    {
+        if (!m_rpc_client->json_rpc_request(req, res, "prune_blockchain", fail_message.c_str()))
+        {
+            return true;
+        }
+    }
+    else
+    {
+        if (!m_rpc_server->on_prune_blockchain(req, res, error_resp) || res.status != CORE_RPC_STATUS_OK)
+        {
+            tools::fail_msg_writer() << make_error(fail_message, res.status);
+            return true;
+        }
+    }
+
+    if (res.pruning_seed)
+    {
+      tools::success_msg_writer() << "Blockchain pruning checked";
+    }
+    else
+    {
+      tools::success_msg_writer() << "Blockchain is not pruned";
+    }
+    return true;
+}
+
 }// namespace daemonize

@@ -1,5 +1,5 @@
 # Copyright (c) 2018, The Kredits Project
-# Copyright (c) 2018, The Loki Project
+# Copyright (c) 2018, The loki Project
 # Copyright (c) 2014-2018, The Monero Project
 #
 # All rights reserved.
@@ -154,7 +154,7 @@ if(ARCH_ID STREQUAL "powerpc64" OR ARCH_ID STREQUAL "ppc64")
   set(PPC     0)
 endif()
 
-if(ARCH_ID STREQUAL "powerpc")
+if(ARCH_ID STREQUAL "powerpc" OR ARCH_ID STREQUAL "ppc")
   set(PPC64LE 0)
   set(PPC64   0)
   set(PPC     1)
@@ -304,7 +304,7 @@ option(STATIC "Link libraries statically" ${DEFAULT_STATIC})
 
 # This is a CMake built-in switch that concerns internal libraries
 if (NOT DEFINED BUILD_SHARED_LIBS AND NOT STATIC AND CMAKE_BUILD_TYPE_LOWER STREQUAL "debug")
-    set(BUILD_SHARED_LIBS ON)
+  set(BUILD_SHARED_LIBS ON)
 endif()
 
 if (BUILD_SHARED_LIBS)
@@ -519,15 +519,8 @@ else (HIDAPI_FOUND)
   message(STATUS "Could not find HIDAPI")
 endif()
 
-# Protobuf, optional. Required for TREZOR.
-include(FindProtobuf)
-find_package(Protobuf)
-if(Protobuf_FOUND)
-  set(HAVE_PROTOBUF 1)
-  add_definitions(-DHAVE_PROTOBUF=1)
-else(Protobuf_FOUND)
-  message(STATUS "Could not find Protobuf")
-endif()
+# Trezor support check
+include(CheckTrezor)
 
 if(MSVC)
   add_definitions("/bigobj /MP /W3 /GS- /D_CRT_SECURE_NO_WARNINGS /wd4996 /wd4345 /D_WIN32_WINNT=0x0600 /DWIN32_LEAN_AND_MEAN /DGTEST_HAS_TR1_TUPLE=0 /FIinline_c.h /D__SSE4_1__")
@@ -605,9 +598,6 @@ else()
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${ARCH_FLAG}")
 
   set(WARNINGS "-Wall -Wextra -Wpointer-arith -Wundef -Wvla -Wwrite-strings -Wno-error=extra -Wno-error=deprecated-declarations -Wno-unused-parameter -Wno-unused-variable -Wno-error=unused-variable -Wno-error=undef -Wno-error=uninitialized")
-  if(NOT MINGW)
-    set(WARNINGS_AS_ERRORS_FLAG "-Werror")
-  endif()
   if(CMAKE_C_COMPILER_ID STREQUAL "Clang")
     if(ARM)
       set(WARNINGS "${WARNINGS} -Wno-error=inline-asm")
@@ -702,6 +692,13 @@ else()
     set(LD_SECURITY_FLAGS "${LD_SECURITY_FLAGS} -Wl,-z,noexecheap")
   endif()
 
+  if(BACKCOMPAT)
+      add_definitions(-DFDELT_TYPE=long\ int)
+      add_linker_flag_if_supported(-Wl,--wrap=__divmoddi4 LD_BACKCOMPAT_FLAGS)
+      add_linker_flag_if_supported(-Wl,--wrap=glob LD_BACKCOMPAT_FLAGS)
+      message(STATUS "Using Lib C back compat flags: ${LD_BACKCOMPAT_FLAGS}")
+  endif()
+
   # some windows linker bits
   if (WIN32)
     add_linker_flag_if_supported(-Wl,--dynamicbase LD_SECURITY_FLAGS)
@@ -714,7 +711,7 @@ else()
 
   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=c11 -D_GNU_SOURCE ${MINGW_FLAG} ${STATIC_ASSERT_FLAG} ${WARNINGS} ${C_WARNINGS} ${COVERAGE_FLAGS} ${PIC_FLAG} ${C_SECURITY_FLAGS}")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -D_GNU_SOURCE ${MINGW_FLAG} ${STATIC_ASSERT_CPP_FLAG} ${WARNINGS} ${CXX_WARNINGS} ${COVERAGE_FLAGS} ${PIC_FLAG} ${CXX_SECURITY_FLAGS}")
-  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${LD_SECURITY_FLAGS}")
+  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${LD_SECURITY_FLAGS} ${LD_BACKCOMPAT_FLAGS}")
 
   # With GCC 6.1.1 the compiled binary malfunctions due to aliasing. Until that
   # is fixed in the code (Issue #847), force compiler to be conservative.
@@ -822,6 +819,9 @@ else()
     set(DEBUG_FLAGS "${DEBUG_FLAGS} -O0 ")
   endif()
 
+  # At least some CLANGs default to not enough for monero
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ftemplate-depth=900")
+
   if(NOT DEFINED USE_LTO_DEFAULT)
     set(USE_LTO_DEFAULT false)
   endif()
@@ -904,9 +904,9 @@ if(MINGW)
   set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -Wa,-mbig-obj")
   set(EXTRA_LIBRARIES mswsock;ws2_32;iphlpapi;crypt32;bcrypt)
   if(DEPENDS)
-    set(ICU_LIBRARIES ${Boost_LOCALE_LIBRARY} sicuio sicuin sicuuc sicudt sicutu iconv)
+    set(ICU_LIBRARIES sicuio sicuin sicuuc sicudt sicutu iconv)
   else()
-    set(ICU_LIBRARIES ${Boost_LOCALE_LIBRARY} icuio icuin icuuc icudt icutu iconv)
+    set(ICU_LIBRARIES icuio icuin icuuc icudt icutu iconv)
   endif()
 elseif(APPLE OR OPENBSD OR ANDROID)
   set(EXTRA_LIBRARIES "")
@@ -924,7 +924,7 @@ endif()
 
 list(APPEND EXTRA_LIBRARIES ${CMAKE_DL_LIBS})
 
-if (HIDAPI_FOUND) 
+if (HIDAPI_FOUND OR LibUSB_COMPILE_TEST_PASSED)
   if (APPLE)
     if(DEPENDS)
       list(APPEND EXTRA_LIBRARIES "-framework Foundation -framework IOKit")
@@ -940,16 +940,20 @@ if (HIDAPI_FOUND)
   endif()
 endif()
 
-option(USE_READLINE "Build with GNU readline support." ON)
-if(USE_READLINE)
-  find_package(Readline)
-  if(READLINE_FOUND AND GNU_READLINE_FOUND)
-    add_definitions(-DHAVE_READLINE)
-    include_directories(${Readline_INCLUDE_DIR})
-    message(STATUS "Found readline library at: ${Readline_ROOT_DIR}")
-    set(EPEE_READLINE epee_readline)
-  else()
-    message(STATUS "Could not find GNU readline library so building without readline support")
+if (BUILD_INTEGRATION)
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D KREDITS_ENABLE_INTEGRATION_TEST_HOOKS")
+else()
+  option(USE_READLINE "Build with GNU readline support." ON)
+  if(USE_READLINE)
+    find_package(Readline)
+    if(READLINE_FOUND AND GNU_READLINE_FOUND)
+      add_definitions(-DHAVE_READLINE)
+      include_directories(${Readline_INCLUDE_DIR})
+      message(STATUS "Found readline library at: ${Readline_ROOT_DIR}")
+      set(EPEE_READLINE epee_readline)
+    else()
+      message(STATUS "Could not find GNU readline library so building without readline support")
+    endif()
   endif()
 endif()
 

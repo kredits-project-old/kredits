@@ -1,6 +1,6 @@
 // Copyright (c) 2014-2018, The Monero Project
 // Copyright (c)      2018, The Loki Project
-// Copyright (c)      2018, Kredits Project
+// Copyright (c)      2018, The Kredits Project
 // 
 // All rights reserved.
 // 
@@ -34,6 +34,9 @@
 #include "string_tools.h"
 #include "daemon/command_server.h"
 
+#include "common/kredits_integration_test_hooks.h"
+
+
 #undef KREDITS_DEFAULT_LOG_CATEGORY
 #define KREDITS_DEFAULT_LOG_CATEGORY "daemon"
 
@@ -66,6 +69,7 @@ t_command_server::t_command_server(
   m_command_lookup.set_handler(
       "print_pl"
     , std::bind(&t_command_parser_executor::print_peer_list, &m_parser, p::_1)
+    , "print_pl [white] [gray] [<limit>]"
     , "Print the current peer list."
     );
   m_command_lookup.set_handler(
@@ -118,18 +122,18 @@ t_command_server::t_command_server(
       "prepare_registration"
     , std::bind(&t_command_parser_executor::prepare_registration, &m_parser)
     , "prepare_registration"
-    , "Interactive prompt to prepare the registration. The resulting registration data is saved to disk."
+    , "Interactive prompt to prepare a service node registration command. The resulting registration command can be run in the command-line wallet to send the registration to the blockchain."
     );
   m_command_lookup.set_handler(
       "print_sn"
     , std::bind(&t_command_parser_executor::print_sn, &m_parser, p::_1)
-    , "print_sn [<pubkey> [...]]"
+    , "print_sn [<pubkey> [...]] [+json]"
     , "Print service node registration info for the current height"
     );
   m_command_lookup.set_handler(
       "print_sn_status"
     , std::bind(&t_command_parser_executor::print_sn_status, &m_parser, p::_1)
-    , "print_sn_status"
+    , "print_sn_status [+json]"
     , "Print service node registration info for this service node"
     );
   m_command_lookup.set_handler(
@@ -320,9 +324,25 @@ t_command_server::t_command_server(
     , "Print information about the blockchain sync state."
     );
     m_command_lookup.set_handler(
+      "pop_blocks"
+    , std::bind(&t_command_parser_executor::pop_blocks, &m_parser, p::_1)
+    , "pop_blocks <nblocks>"
+    , "Remove blocks from end of blockchain"
+    );
+    m_command_lookup.set_handler(
       "version"
     , std::bind(&t_command_parser_executor::version, &m_parser, p::_1)
     , "Print version information."
+    );
+    m_command_lookup.set_handler(
+      "prune_blockchain"
+    , std::bind(&t_command_parser_executor::prune_blockchain, &m_parser, p::_1)
+    , "Prune the blockchain."
+    );
+    m_command_lookup.set_handler(
+      "check_blockchain_pruning"
+    , std::bind(&t_command_parser_executor::check_blockchain_pruning, &m_parser, p::_1)
+    , "Check the blockchain pruning."
     );
 }
 
@@ -341,12 +361,46 @@ bool t_command_server::process_command_vec(const std::vector<std::string>& cmd)
   return result;
 }
 
+#if defined(KREDITS_ENABLE_INTEGRATION_TEST_HOOKS)
+#include <thread>
+#endif
+
 bool t_command_server::start_handling(std::function<void(void)> exit_handler)
 {
   if (m_is_rpc) return false;
 
-  m_command_lookup.start_handling("", get_commands_str(), exit_handler);
+#if defined(KREDITS_ENABLE_INTEGRATION_TEST_HOOKS)
+  auto handle_shared_mem_ins_and_outs = [&]()
+  {
+    // TODO(doyle): Hack, don't hook into input until the daemon has completely initialised, i.e. you can print the status
+    while(!kredits::core_is_idle) {}
+    mlog_set_categories("");
 
+    for (;;)
+    {
+      kredits::fixed_buffer const input = kredits::read_from_stdin_shared_mem();
+      std::vector<std::string> args  = kredits::separate_stdin_to_space_delim_args(&input);
+      {
+        boost::unique_lock<boost::mutex> scoped_lock(kredits::integration_test_mutex);
+        kredits::use_standard_cout();
+        std::cout << input.data << std::endl;
+        kredits::use_redirected_cout();
+      }
+
+      process_command_vec(args);
+      if (args.size() == 1 && args[0] == "exit")
+      {
+        kredits::deinit_integration_test_context();
+        break;
+      }
+
+      kredits::write_redirected_stdout_to_shared_mem();
+    }
+  };
+  static std::thread handle_remote_stdin_out_thread(handle_shared_mem_ins_and_outs);
+#endif
+
+  m_command_lookup.start_handling("", get_commands_str(), exit_handler);
   return true;
 }
 

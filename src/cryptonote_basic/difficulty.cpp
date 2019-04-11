@@ -1,6 +1,6 @@
 // Copyright (c) 2014-2018, The Monero Project
 // Copyright (c)      2018, The Loki Project
-// Copyright (c)      2018, Kredits Project
+// Copyright (c)      2018, The Kredits Project
 //
 // All rights reserved.
 //
@@ -36,8 +36,8 @@
 #include <cstdint>
 #include <vector>
 
-#include "common/int-util.h"
-#include "common/round.h"
+#include "common/kredits.h"
+#include "int-util.h"
 #include "crypto/hash.h"
 #include "cryptonote_config.h"
 #include "difficulty.h"
@@ -194,7 +194,7 @@ namespace cryptonote {
     harmonic_mean_D = N / sum_inverse_D;
 
     // Keep LWMA sane in case something unforeseen occurs.
-    if (static_cast<int64_t>(kredits_round(LWMA)) < T / 20)
+    if (static_cast<int64_t>(kredits::round(LWMA)) < T / 20)
       LWMA = static_cast<double>(T / 20);
 
     nextDifficulty = harmonic_mean_D * T / LWMA * adjust;
