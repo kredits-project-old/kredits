@@ -218,10 +218,10 @@ namespace config
     uint16_t const RPC_DEFAULT_PORT = 26395;
     uint16_t const ZMQ_RPC_DEFAULT_PORT = 26396;
     boost::uuids::uuid const NETWORK_ID = { {
-        0xbb ,0x37, 0x9B, 0x22 , 0x0A, 0x5f, 0x3a, 0x78, 0x65, 0xe1, 0x97, 0xe1, 0x6f, 0xca, 0xb8, 0x02
+        0xbb ,0x37, 0x9B, 0x22 , 0x78, 0x65, 0xe1, 0x97, 0x0A, 0x5f, 0x3a, 0xe1, 0x6f, 0xca, 0xb8, 0x02
       } }; // Bender's daydream
     std::string const GENESIS_TX = "011e01ff0001dcbda1dfbf02029b2e4c0281c0b02e7c53291a94d1d0cbff8883f8024f5142ee494ffbbd088071210130a4be58ee8e15f0e4223816f65703c10266e5d00c7a3f11c720b10c8e3f323b";
-    uint32_t const GENESIS_NONCE = 10001;
+    uint32_t const GENESIS_NONCE = 100011;
 
     uint64_t const GOVERNANCE_REWARD_INTERVAL_IN_BLOCKS = 1000;
     std::string const GOVERNANCE_WALLET_ADDRESS[] =
