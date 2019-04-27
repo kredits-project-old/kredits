@@ -426,6 +426,7 @@ namespace nodetool
     if (nettype == cryptonote::TESTNET)
     {
       full_addrs.insert("23.95.95.228:26394");
+	  full_addrs.insert("107.189.11.8:26394");
     }
     else if (nettype == cryptonote::STAGENET)
     {
