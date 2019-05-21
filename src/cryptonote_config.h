@@ -46,7 +46,7 @@
 #define CURRENT_BLOCK_MAJOR_VERSION                     7
 #define CURRENT_BLOCK_MINOR_VERSION                     7
 #define CRYPTONOTE_BLOCK_FUTURE_TIME_LIMIT_V2           60*10
-#define CRYPTONOTE_DEFAULT_TX_SPENDABLE_AGE             10
+#define CRYPTONOTE_DEFAULT_TX_SPENDABLE_AGE             2
 #define CRYPTONOTE_DEFAULT_TX_MIXIN                     9
 
 #define STAKING_REQUIREMENT_LOCK_BLOCKS_EXCESS          20
@@ -89,11 +89,11 @@ static_assert(STAKING_PORTIONS % 3 == 0, "Use a multiple of three, so that it di
 
 #define PREMINE											((uint64_t)1000000000000000000)
 
-#define FEE_PER_KB_OLD                                  (uint64_t(10000)) // pow(10, 5)
-#define FEE_PER_KB                                      (uint64_t(200)) // 2 * pow(10, 5)
+#define FEE_PER_KB_OLD                                  (uint64_t(10000)) // pow(10, 4)
+#define FEE_PER_KB                                      (uint64_t(200)) // 2 * pow(10, 2)
 #define FEE_PER_BYTE                                    (uint64_t(10000))
-#define DYNAMIC_FEE_PER_KB_BASE_FEE                     (uint64_t(20000)) // 2 * pow(10,5)
-#define DYNAMIC_FEE_PER_KB_BASE_BLOCK_REWARD            (uint64_t(1000000)) // 10 * pow(10,5)
+#define DYNAMIC_FEE_PER_KB_BASE_FEE                     (uint64_t(20000)) // 2 * pow(10,4)
+#define DYNAMIC_FEE_PER_KB_BASE_BLOCK_REWARD            (uint64_t(1000000)) // 10 * pow(10,6)
 #define DYNAMIC_FEE_PER_KB_BASE_FEE_V5                  (uint64_t(100) * (uint64_t)CRYPTONOTE_BLOCK_GRANTED_FULL_REWARD_ZONE_V2 / CRYPTONOTE_BLOCK_GRANTED_FULL_REWARD_ZONE_V5)
 #define DYNAMIC_FEE_REFERENCE_TRANSACTION_WEIGHT         ((uint64_t)300)
 
