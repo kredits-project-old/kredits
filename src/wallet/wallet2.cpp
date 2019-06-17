@@ -11731,6 +11731,27 @@ bool wallet2::verify_with_public_key(const std::string &data, const crypto::publ
   return crypto::check_signature(hash, public_key, s);
 }
 //----------------------------------------------------------------------------------------------------
+static bool try_get_tx_pub_key_using_td(const tools::wallet2::transfer_details &td, crypto::public_key &pub_key)
+{
+  std::vector<tx_extra_field> tx_extra_fields;
+  if(!parse_tx_extra(td.m_tx.extra, tx_extra_fields))
+  {
+    // Extra may only be partially parsed, it's OK if tx_extra_fields contains public key
+  }
+
+  if (td.m_pk_index >= tx_extra_fields.size())
+    return false;
+
+  tx_extra_pub_key pub_key_field;
+  if (find_tx_extra_field_by_type(tx_extra_fields, pub_key_field, td.m_pk_index))
+  {
+    pub_key = pub_key_field.pub_key;
+    return true;
+  }
+
+  return false;
+}
+
 crypto::public_key wallet2::get_tx_pub_key_from_received_outs(const tools::wallet2::transfer_details &td) const
 {
   std::vector<tx_extra_field> tx_extra_fields;
@@ -11844,14 +11865,16 @@ std::pair<size_t, std::vector<std::pair<crypto::key_image, crypto::signature>>> 
     const cryptonote::txout_to_key &o = boost::get<const cryptonote::txout_to_key>(out.target);
     const crypto::public_key pkey = o.key;
 
-    // get tx pub key
-    std::vector<tx_extra_field> tx_extra_fields;
-    if(!parse_tx_extra(td.m_tx.extra, tx_extra_fields))
+    crypto::public_key tx_pub_key;
+    if (!try_get_tx_pub_key_using_td(td, tx_pub_key))
     {
-      // Extra may only be partially parsed, it's OK if tx_extra_fields contains public key
+      // TODO(wtips): Fallback to old get tx pub key method for
+      // incase for now. But we need to go find out why we can't just use
+      // td.m_pk_index for everything? If we were able to decode the output
+      // using that, why not use it for everthing?
+      tx_pub_key = get_tx_pub_key_from_received_outs(td);
     }
 
-    crypto::public_key tx_pub_key = get_tx_pub_key_from_received_outs(td);
     const std::vector<crypto::public_key> additional_tx_pub_keys = get_additional_tx_pub_keys_from_extra(td.m_tx);
 
     // generate ephemeral secret key
@@ -12356,7 +12379,15 @@ process:
     cryptonote::keypair in_ephemeral;
 
     THROW_WALLET_EXCEPTION_IF(td.m_tx.vout.empty(), error::wallet_internal_error, "tx with no outputs at index " + boost::lexical_cast<std::string>(i + offset));
-    crypto::public_key tx_pub_key = get_tx_pub_key_from_received_outs(td);
+    crypto::public_key tx_pub_key;
+    if (!try_get_tx_pub_key_using_td(td, tx_pub_key))
+    {
+      // TODO(wtips): Fallback to old get tx pub key method for
+      // incase for now. But we need to go find out why we can't just use
+      // td.m_pk_index for everything? If we were able to decode the output
+      // using that, why not use it for everthing?
+      tx_pub_key = get_tx_pub_key_from_received_outs(td);
+    }
     const std::vector<crypto::public_key> additional_tx_pub_keys = get_additional_tx_pub_keys_from_extra(td.m_tx);
 
     THROW_WALLET_EXCEPTION_IF(td.m_tx.vout[td.m_internal_output_index].target.type() != typeid(cryptonote::txout_to_key),
@@ -12533,7 +12564,15 @@ crypto::key_image wallet2::get_multisig_composite_key_image(size_t n) const
   CHECK_AND_ASSERT_THROW_MES(n < m_transfers.size(), "Bad output index");
 
   const transfer_details &td = m_transfers[n];
-  const crypto::public_key tx_key = get_tx_pub_key_from_received_outs(td);
+  crypto::public_key tx_key;
+  if (!try_get_tx_pub_key_using_td(td, tx_key))
+  {
+    // TODO(wtips): Fallback to old get tx pub key method for
+    // incase for now. But we need to go find out why we can't just use
+    // td.m_pk_index for everything? If we were able to decode the output
+    // using that, why not use it for everthing?
+    tx_key = get_tx_pub_key_from_received_outs(td);
+  }
   const std::vector<crypto::public_key> additional_tx_keys = cryptonote::get_additional_tx_pub_keys_from_extra(td.m_tx);
   crypto::key_image ki;
   std::vector<crypto::key_image> pkis;
@@ -13198,10 +13237,15 @@ bool wallet2::generate_signature_for_request_stake_unlock(crypto::key_image cons
     const cryptonote::txout_to_key &o = boost::get<const cryptonote::txout_to_key>(out.target);
     const crypto::public_key pkey = o.key;
 
-    std::vector<tx_extra_field> tx_extra_fields;
-    parse_tx_extra(td.m_tx.extra, tx_extra_fields);
-
-    crypto::public_key tx_pub_key = get_tx_pub_key_from_received_outs(td);
+    crypto::public_key tx_pub_key;
+    if (!try_get_tx_pub_key_using_td(td, tx_pub_key))
+    {
+      // TODO(wtips): Fallback to old get tx pub key method for
+      // incase for now. But we need to go find out why we can't just use
+      // td.m_pk_index for everything? If we were able to decode the output
+      // using that, why not use it for everthing?
+      tx_pub_key = get_tx_pub_key_from_received_outs(td);
+    }
     const std::vector<crypto::public_key> additional_tx_pub_keys = get_additional_tx_pub_keys_from_extra(td.m_tx);
 
     // generate ephemeral secret key
