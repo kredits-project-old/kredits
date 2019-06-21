@@ -95,26 +95,29 @@ struct hard_fork_record
   time_t time;
 };
 
-// TODO(doyle): Move this out into a globally accessible object
+// TODO: Move this out into a globally accessible object
 // version 7 from the start of the blockchain, inhereted from Monero mainnet
 static const hard_fork_record mainnet_hard_forks[] =
 {
-  { network_version_7,                   1,      0, 1554448799 },
-  { network_version_8,                   10,  0, 1554448860 },
+  { network_version_7,             	    	     1, 0, 1561161600 },
+  { network_version_8,							10, 0, 1561161720 },
+  { network_version_9_service_nodes,  	     43200, 0, 1566432000 },
+  { network_version_10_bulletproofs,  	     43201, 0, 1566432120 },
+  { network_version_11_infinite_staking,     43202, 0, 1566432240 },
+
 };
 
 static const hard_fork_record testnet_hard_forks[] =
 {
-  { network_version_7,                   1, 0, 1554448799 },
-  { network_version_8,                   2, 0, 1554448860 },
+  { network_version_7,                   1, 0, 1561161600 },
+  { network_version_8,                   2, 0, 1561161720 },
 };
 
 static const hard_fork_record stagenet_hard_forks[] =
 {
-  { network_version_7,                   1,     0, 1554448799 },
-  { network_version_8,                   2, 0, 1554448860 },
+  { network_version_7,                   1, 0, 1561161600 },
+  { network_version_8,                   2, 0, 1561161720 },
 };
-
 //------------------------------------------------------------------
 Blockchain::Blockchain(tx_memory_pool& tx_pool, service_nodes::service_node_list& service_node_list, service_nodes::deregister_vote_pool& deregister_vote_pool):
   m_db(), m_tx_pool(tx_pool), m_hardfork(NULL), m_timestamps_and_difficulties_height(0), m_current_block_cumul_weight_limit(0), m_current_block_cumul_weight_median(0),
