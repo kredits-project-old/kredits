@@ -206,7 +206,7 @@ namespace config
   uint64_t const GOVERNANCE_REWARD_INTERVAL_IN_BLOCKS = ((60 * 60 * 24 * 7) / DIFFICULTY_TARGET_V2);
   std::string const GOVERNANCE_WALLET_ADDRESS[] =
   {
-    "Xkmarx6E2vC4LEfTp4ZvVZa4qZdB9MkWBDxhpuSFRYd3U2JMR4pNA5fFCb1htwtSJqB16a9uyr2fv8u9JhBTYTQ6J8wGf9ghaAN", // hardfork v7-10
+    "Xkmart9J4pXSYcQaWws3av9LEwCdf9WuHbpYeWxGHHfXKSNmdbsnCqkCutnyvr58qrBoZFdAz39r1ffAZo7h8VSA7cUjmLp77nX", // hardfork v7-10
   };
 
   namespace testnet
@@ -226,8 +226,7 @@ namespace config
     uint64_t const GOVERNANCE_REWARD_INTERVAL_IN_BLOCKS = 1000;
     std::string const GOVERNANCE_WALLET_ADDRESS[] =
     {
-      "Xktai3gZ9mSUDhF5fN4i9yQumQUgxEEssE8EsUusSijzff7tzYNwUBG7FpEWu6kP7eJDA4woSCQADHqmJu4UNQX4L4BcyHg6XTU", // hardfork v7-9
-      "Xktai3gZ9mSUDhF5fN4i9yQumQUgxEEssE8EsUusSijzff7tzYNwUBG7FpEWu6kP7eJDA4woSCQADHqmJu4UNQX4L4BcyHg6XTU", // hardfork v10
+      "XktahxfkBiJ3j4FMnu6VBEGqw4tmMM53h4nozH2wmQLGJ9XLSpBS9wJ1yghLY4EiU1d8rb9VgXhwEiT1Sh423WpePoP5vEzvHNB", // hardfork v7-10
     };
 
   }
@@ -249,8 +248,7 @@ namespace config
     uint64_t const GOVERNANCE_REWARD_INTERVAL_IN_BLOCKS = ((60 * 60 * 24 * 7) / DIFFICULTY_TARGET_V2);
     std::string const GOVERNANCE_WALLET_ADDRESS[] =
     {
-      "XksaorfSSAMYPFDEqwEx6bYJirBSCXjua1HLJzPyjdYSUpzSQoheK9sDq19gk1sLP1ELAD3Bdpo1rZyD9ss3g7mS97B9SVKWqp", // hardfork v7-9
-      "XksaorfSSAMYPFDEqwEx6bYJirBSCXjua1HLJzPyjdYSUpzSQoheK9sDq19gk1sLP1ELAD3Bdpo1rZyD9ss3g7mS97B9SVKWqp", // hardfork v10
+      "Xksaj7asZfjB3sxtjd2d1hKXwtakuvb6hMmxodKsGpiNFF5LywSNUbdNPT4xvbakQdFvWLLRcozXh1R1eisCXSrG8moTeUWHw7", // hardfork v7-10
     };
   }
 }
