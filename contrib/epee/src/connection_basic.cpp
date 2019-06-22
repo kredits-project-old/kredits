@@ -47,6 +47,12 @@
 // TODO:
 #include "net/network_throttle-detail.hpp"
 
+#if BOOST_VERSION >= 107000
+#define GET_IO_SERVICE(s) ((boost::asio::io_context&)(s).get_executor().context())
+#else
+#define GET_IO_SERVICE(s) ((s).get_io_service())
+#endif
+
 #undef KREDITS_DEFAULT_LOG_CATEGORY
 #define KREDITS_DEFAULT_LOG_CATEGORY "net.p2p"
 
